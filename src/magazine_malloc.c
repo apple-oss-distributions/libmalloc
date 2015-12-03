@@ -1203,18 +1203,8 @@ deallocate_pages(szone_t *szone, void *addr, size_t size, unsigned debug_flags)
 		szone_error(szone, 0, "Can't deallocate_pages region", addr, NULL);
 }
 
-/* On OS X we use MADV_FREE_REUSABLE, which signals the kernel to remove the given
- * pages from the memory statistics for our process. However, on returning that memory
- * to use we have to signal that it has been reused.
- *
- * On iOS MADV_FREE is used, which does no such tinkering and madvise_reuse_range is a
- * no-op.
- */
-#if TARGET_OS_EMBEDDED
-# define MADVISE_STYLE MADV_FREE
-#else
-# define MADVISE_STYLE MADV_FREE_REUSABLE
-#endif
+/* As of <rdar://problem/19818071> we now use MADV_FREE_REUSABLE on both platforms. */
+#define MADVISE_STYLE MADV_FREE_REUSABLE
 
 static int
 madvise_free_range(szone_t *szone, region_t r, uintptr_t pgLo, uintptr_t pgHi, uintptr_t *last)
@@ -1250,7 +1240,6 @@ madvise_free_range(szone_t *szone, region_t r, uintptr_t pgLo, uintptr_t pgHi, u
 static int
 madvise_reuse_range(szone_t *szone, region_t r, uintptr_t pgLo, uintptr_t phHi)
 {
-#if !TARGET_OS_EMBEDDED
 	if (phHi > pgLo) {
 		size_t len = phHi - pgLo;
 
@@ -1263,7 +1252,6 @@ madvise_reuse_range(szone_t *szone, region_t r, uintptr_t pgLo, uintptr_t phHi)
 			return 1;
 		}
 	}
-#endif
 	return 0;
 }
 
@@ -2828,6 +2816,12 @@ tiny_try_realloc_in_place(szone_t *szone, void *ptr, size_t old_size, size_t new
 	magazine_t	*tiny_mag_ptr = mag_lock_zine_for_region_trailer(szone, szone->tiny_magazines,
 																 REGION_TRAILER_FOR_TINY_REGION(TINY_REGION_FOR_PTR(ptr)),
 																 MAGAZINE_INDEX_FOR_TINY_REGION(TINY_REGION_FOR_PTR(ptr)));
+
+	if (DEPOT_MAGAZINE_INDEX == MAGAZINE_INDEX_FOR_TINY_REGION(TINY_REGION_FOR_PTR(ptr)))
+	{
+	    SZONE_MAGAZINE_PTR_UNLOCK(szone, tiny_mag_ptr);
+	    return 0;
+	}
 
 	/*
 	 * Look for a free block immediately afterwards.  If it's large enough, we can consume (part of)
@@ -4627,6 +4621,12 @@ small_try_realloc_in_place(szone_t *szone, void *ptr, size_t old_size, size_t ne
 	magazine_t	*small_mag_ptr = mag_lock_zine_for_region_trailer(szone, szone->small_magazines,
 																  REGION_TRAILER_FOR_SMALL_REGION(SMALL_REGION_FOR_PTR(ptr)),
 																  MAGAZINE_INDEX_FOR_SMALL_REGION(SMALL_REGION_FOR_PTR(ptr)));
+	if (DEPOT_MAGAZINE_INDEX == MAGAZINE_INDEX_FOR_SMALL_REGION(SMALL_REGION_FOR_PTR(ptr)))
+	{
+	    SZONE_MAGAZINE_PTR_UNLOCK(szone, small_mag_ptr);
+	    return 0;
+	}
+
 
 	/*
 	 * Look for a free block immediately afterwards.  If it's large enough, we can consume (part of)
