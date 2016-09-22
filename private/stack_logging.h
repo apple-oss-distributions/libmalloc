@@ -24,6 +24,8 @@
 #import <malloc/malloc.h>
 #import <mach/vm_statistics.h>
 
+#define STACK_LOGGING_MAX_STACK_SIZE 512
+
 #define stack_logging_type_free		0
 #define stack_logging_type_generic	1	/* anything that is not allocation/deallocation */
 #define stack_logging_type_alloc	2	/* malloc, realloc, etc... */
@@ -52,14 +54,16 @@
 /* Macro used to disguise addresses so that leak finding can work */
 #define STACK_LOGGING_DISGUISE(address)	((address) ^ 0x00005555) /* nicely idempotent */
 
-extern int stack_logging_enable_logging; /* when clear, no logging takes place */
-extern int stack_logging_dontcompact; /* default is to compact; when set does not compact alloc/free logs; useful for tracing history */
-extern int stack_logging_finished_init; /* set after we've returned from the Libsystem initialiser */
-extern int stack_logging_postponed; /* set if we needed to postpone logging till after initialisation */
+typedef enum {
+	stack_logging_mode_none = 0,
+	stack_logging_mode_all,
+	stack_logging_mode_malloc,
+	stack_logging_mode_vm,
+	stack_logging_mode_lite
+} stack_logging_mode_type;
 
-
-extern void stack_logging_log_stack(unsigned type, unsigned arg1, unsigned arg2, unsigned arg3, unsigned result, unsigned num_hot_to_skip);
-	/* This is the old log-to-memory logger, which is now deprecated.  It remains for compatibility with performance tools that haven't been updated to disk_stack_logging_log_stack() yet. */
+extern boolean_t turn_on_stack_logging(stack_logging_mode_type mode);
+extern void turn_off_stack_logging();
 
 extern void __disk_stack_logging_log_stack(uint32_t type_flags, uintptr_t zone_ptr, uintptr_t size, uintptr_t ptr_arg, uintptr_t return_val, uint32_t num_hot_to_skip);
 	/* Fits as the malloc_logger; logs malloc/free/realloc events and can log custom events if called directly */
@@ -67,12 +71,25 @@ extern void __disk_stack_logging_log_stack(uint32_t type_flags, uintptr_t zone_p
 
 /* 64-bit-aware stack log access.  As new SPI, these routines are prefixed with double-underscore to avoid conflict with Libsystem clients. */
 
-typedef struct {
+typedef struct mach_stack_logging_record {
 	uint32_t		type_flags;
 	uint64_t		stack_identifier;
 	uint64_t		argument;
 	mach_vm_address_t	address;
 } mach_stack_logging_record_t;
+
+extern kern_return_t __mach_stack_logging_start_reading(task_t task, vm_address_t shared_memory_address, boolean_t *uses_lite_mode);
+extern kern_return_t __mach_stack_logging_stop_reading(task_t task);
+
+/* Clients *should* call these start/stop functions to properly initialize stack logging data
+ * structures and fully clean them up when they're done looking at a process.  If the client does *not*
+ * call these then currently it should still work but some data structures will still remain after
+ * reading the stack logs (e.g., an extra shared memory segment, an open stack log file, etc).
+ * NULL can be passed for uses_lite_mode if the client doesn’t need them.
+ *
+ * It is recommended that the client suspend the task before actually reading the stacks, and resume the task when done,
+ * if the task uses lite mode.
+ */
 
 extern kern_return_t __mach_stack_logging_set_file_path(task_t task, char* file_path);
 
@@ -86,47 +103,42 @@ extern kern_return_t __mach_stack_logging_frames_for_uniqued_stack(task_t task, 
     /* Given a uniqued_stack fills stack_frames_buffer */
 
 
-#pragma mark -
-#pragma mark Legacy
+struct backtrace_uniquing_table;
 
-/* The following is the old 32-bit-only, in-process-memory stack logging.  This is deprecated and clients should move to the above 64-bit-aware disk stack logging SPI. */
+extern kern_return_t
+__mach_stack_logging_uniquing_table_read_stack(struct backtrace_uniquing_table *uniquing_table,
+											   uint64_t stackid,
+											   mach_vm_address_t *out_frames_buffer,
+											   uint32_t *out_frames_count,
+											   uint32_t max_frames);
 
-typedef struct {
-    unsigned	type;
-    unsigned	uniqued_stack;
-    unsigned	argument;
-    unsigned	address; /* disguised, to avoid confusing leaks */
-} stack_logging_record_t;
+extern
+struct backtrace_uniquing_table *
+__mach_stack_logging_copy_uniquing_table(task_t task);
+/* returns a retained pointer to copy of the task's uniquing table */
 
-typedef struct {
-    unsigned	overall_num_bytes;
-    unsigned	num_records;
-    unsigned	lock; /* 0 means OK to lock; used for inter-process locking */
-    unsigned	*uniquing_table; /* allocated using vm_allocate() */
-            /* hashtable organized as (PC, uniqued parent)
-            Only the second half of the table is active
-            To enable us to grow dynamically */
-    unsigned	uniquing_table_num_pages; /* number of pages of the table */
-    unsigned	extra_retain_count; /* not used by stack_logging_log_stack */
-    unsigned	filler[2]; /* align to cache lines for better performance */
-    stack_logging_record_t	records[0]; /* records follow here */
-} stack_logging_record_list_t;
+extern
+void
+__mach_stack_logging_uniquing_table_release(struct backtrace_uniquing_table *);
 
-extern stack_logging_record_list_t *stack_logging_the_record_list;
-    /* This is the global variable containing all logs */
+extern
+void
+__mach_stack_logging_uniquing_table_retain(struct backtrace_uniquing_table *);
 
-extern kern_return_t stack_logging_get_frames(task_t task, memory_reader_t reader, vm_address_t address, vm_address_t *stack_frames_buffer, unsigned max_stack_frames, unsigned *num_frames);
-    /* Gets the last record in stack_logging_the_record_list about address */
+extern
+size_t
+__mach_stack_logging_uniquing_table_sizeof(struct backtrace_uniquing_table *);
+/* returns the serialized size of a uniquing talbe in bytes */
 
-#define STACK_LOGGING_ENUMERATION_PROVIDED	1	// temporary to avoid dependencies between projects
+extern
+void *
+__mach_stack_logging_uniquing_table_serialize(struct backtrace_uniquing_table *table, mach_vm_size_t *size);
+/* Writes out a serialized representation of the table.  Free it with mach_vm_deallocate. */
 
-extern kern_return_t stack_logging_enumerate_records(task_t task, memory_reader_t reader, vm_address_t address, void enumerator(stack_logging_record_t, void *), void *context);
-    /* Gets all the records about address;
-    If !address, gets all records */
-
-extern kern_return_t stack_logging_frames_for_uniqued_stack(task_t task, memory_reader_t reader, unsigned uniqued_stack, vm_address_t *stack_frames_buffer, unsigned max_stack_frames, unsigned *num_frames);
-    /* Given a uniqued_stack fills stack_frames_buffer */
-
+extern
+struct backtrace_uniquing_table *
+__mach_stack_logging_uniquing_table_copy_from_serialized(void *buffer, size_t size);
+/* creates a malloc uniquing table from a serialized representation */
 
 
 extern void thread_stack_pcs(vm_address_t *buffer, unsigned max, unsigned *num);

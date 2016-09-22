@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2015 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,58 +21,84 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef __MALLOC_INTERNAL_H
-#define __MALLOC_INTERNAL_H
+#ifndef __LOCKING_H
+#define __LOCKING_H
 
-#include <TargetConditionals.h>
-#include <os/lock_private.h>
+#if CONFIG_OS_LOCK_UNFAIR
 
-#if TARGET_OS_EMBEDDED && !defined(MALLOC_USE_OS_LOCK_HANDOFF)
-#define MALLOC_USE_OS_LOCK_HANDOFF 1 // <rdar://problem/13807682>
-#endif
+typedef os_unfair_lock _malloc_lock_s;
+#define _MALLOC_LOCK_INIT OS_UNFAIR_LOCK_INIT
 
-#if MALLOC_USE_OS_LOCK_HANDOFF
+__attribute__((always_inline))
+static inline void
+_malloc_lock_init(_malloc_lock_s *lock) {
+    *lock = OS_UNFAIR_LOCK_INIT;
+}
+
+MALLOC_ALWAYS_INLINE
+static inline void
+_malloc_lock_lock(_malloc_lock_s *lock) {
+	return os_unfair_lock_lock_with_options_inline(lock,
+			OS_UNFAIR_LOCK_DATA_SYNCHRONIZATION);
+}
+
+MALLOC_ALWAYS_INLINE
+static inline bool
+_malloc_lock_trylock(_malloc_lock_s *lock) {
+    return os_unfair_lock_trylock_inline(lock);
+}
+
+MALLOC_ALWAYS_INLINE
+static inline void
+_malloc_lock_unlock(_malloc_lock_s *lock) {
+    return os_unfair_lock_unlock_inline(lock);
+}
+
+#else // CONFIG_OS_LOCK_UNFAIR
+#if CONFIG_OS_LOCK_HANDOFF
+
 typedef os_lock_handoff_s _malloc_lock_s;
 #define _MALLOC_LOCK_INIT OS_LOCK_HANDOFF_INIT
 
 __attribute__((always_inline))
 static inline void
 _malloc_lock_init(_malloc_lock_s *lock) {
-	const os_lock_handoff_s _os_lock_handoff_init = OS_LOCK_HANDOFF_INIT;
-	*lock = _os_lock_handoff_init;
+    const os_lock_handoff_s _os_lock_handoff_init = OS_LOCK_HANDOFF_INIT;
+    *lock = _os_lock_handoff_init;
 }
 
-#else /* !MALLOC_USE_OS_LOCK_HANDOFF */
+#else //CONFIG_OS_LOCK_HANDOFF
 
 typedef os_lock_spin_s _malloc_lock_s;
-
 #define _MALLOC_LOCK_INIT OS_LOCK_SPIN_INIT
 
-__attribute__((always_inline))
+MALLOC_ALWAYS_INLINE
 static inline void
 _malloc_lock_init(_malloc_lock_s *lock) {
-	const os_lock_spin_s _os_lock_spin_init = OS_LOCK_SPIN_INIT;
-	*lock = _os_lock_spin_init;
+    const os_lock_spin_s _os_lock_spin_init = OS_LOCK_SPIN_INIT;
+    *lock = _os_lock_spin_init;
 }
 
-#endif /* !MALLOC_USE_OS_LOCK_HANDOFF */
+#endif
 
-__attribute__((always_inline))
+MALLOC_ALWAYS_INLINE
 static inline void
 _malloc_lock_lock(_malloc_lock_s *lock) {
-	return os_lock_lock(lock);
+    return os_lock_lock(lock);
 }
 
-__attribute__((always_inline))
+MALLOC_ALWAYS_INLINE
 static inline bool
 _malloc_lock_trylock(_malloc_lock_s *lock) {
-	return os_lock_trylock(lock);
+    return os_lock_trylock(lock);
 }
 
-__attribute__((always_inline))
+MALLOC_ALWAYS_INLINE
 static inline void
 _malloc_lock_unlock(_malloc_lock_s *lock) {
-	return os_lock_unlock(lock);
+    return os_lock_unlock(lock);
 }
 
-#endif // __MALLOC_INTERNAL_H
+#endif // !CONFIG_OS_LOCK_UNFAIR
+
+#endif // __LOCKING_H
