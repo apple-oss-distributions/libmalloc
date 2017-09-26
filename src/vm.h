@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2016 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,28 +21,42 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef __NANO_MALLOC_H
-#define __NANO_MALLOC_H
 
-#define MALLOC_HELPER_ZONE_STRING "MallocHelperZone"
+#ifndef __VM_H
+#define __VM_H
 
-// Forward decl for the nanozone.
-typedef struct nanozone_s nanozone_t;
-
-// Nano malloc enabled flag
-MALLOC_NOEXPORT
-extern boolean_t _malloc_engaged_nano;
-
-MALLOC_NOEXPORT
-malloc_zone_t *
-create_nano_zone(size_t initial_size, malloc_zone_t *helper_zone, unsigned debug_flags);
+static inline bool
+mvm_aslr_enabled(void)
+{
+	return _dyld_get_image_slide((const struct mach_header *)_NSGetMachExecuteHeader()) != 0;
+}
 
 MALLOC_NOEXPORT
 void
-nano_forked_zone(nanozone_t *nanozone);
+mvm_aslr_init(void);
+
+MALLOC_NOEXPORT
+void *
+mvm_allocate_pages(size_t size, unsigned char align, unsigned debug_flags, int vm_page_label);
+
+MALLOC_NOEXPORT
+void *
+mvm_allocate_pages_securely(size_t size, unsigned char align, int vm_page_label, uint32_t debug_flags);
 
 MALLOC_NOEXPORT
 void
-nano_init(const char *envp[], const char *apple[]);
+mvm_deallocate_pages(void *addr, size_t size, unsigned debug_flags);
 
-#endif // __NANO_MALLOC_H
+MALLOC_NOEXPORT
+int
+mvm_madvise_free(rack_t *szone, region_t r, uintptr_t pgLo, uintptr_t pgHi, uintptr_t *last);
+
+MALLOC_NOEXPORT
+int
+mvm_madvise_reuse(region_t r, uintptr_t pgLo, uintptr_t phHi, uint32_t debug_flags);
+
+MALLOC_NOEXPORT
+void
+mvm_protect(void *address, size_t size, unsigned protection, unsigned debug_flags);
+
+#endif // __VM_H

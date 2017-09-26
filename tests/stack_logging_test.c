@@ -4,8 +4,10 @@
 #include <malloc/malloc.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#include "stack_logging.h"
+#include <stack_logging.h>
 #include <sys/stat.h>
+#include <sys/event.h>
+#include <malloc_private.h>
 
 #if DARWINTEST
 #include <darwintest.h>
@@ -96,7 +98,7 @@ check_stacks(char *ptrs[], int num_ptrs, boolean_t lite_mode)
 	
 	for (int i = 0; i < num_ptrs; i++) {
 		kern_return_t ret = (lite_mode) ?
-		__mach_stack_logging_frames_for_uniqued_stack(mach_task_self(), get_stack_id_from_ptr(ptrs[i]), frames, MAX_FRAMES, &frames_count) :
+		__mach_stack_logging_get_frames_for_stackid(mach_task_self(), get_stack_id_from_ptr(ptrs[i]), frames, MAX_FRAMES, &frames_count, NULL) :
 		__mach_stack_logging_get_frames(mach_task_self(), (mach_vm_address_t) ptrs[i], frames, MAX_FRAMES, &frames_count);
 		
 		EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_get_frames = %d\n", (int) ret);
@@ -418,6 +420,51 @@ test_pressure_relief(malloc_zone_t *default_zone)
 }
 
 static void
+test_realloc_non_lite_ptr(char *ptr)
+{
+	// the ptr was malloc'd before lite mode was turned on, therefore not in the lite zone.
+	// make sure realloc succeeds, and that the new ptr has a valid stack associated with it
+
+	char *new_ptr = realloc(ptr, 200);
+	
+	mach_vm_address_t frames[MAX_FRAMES];
+	uint32_t frames_count;
+	
+	kern_return_t ret =  __mach_stack_logging_get_frames_for_stackid(mach_task_self(), get_stack_id_from_ptr(new_ptr), frames, MAX_FRAMES, &frames_count, NULL);
+		
+	EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_get_frames = %d\n", (int) ret);
+	EXPECT_TRUE(frames_count > 0, "number of frames returned from __mach_stack_logging_get_frames = %u\n", frames_count);
+	
+	// test that we can realloc the ptr now that it's in the lite zone
+	new_ptr =  realloc(new_ptr, 100);
+	
+	ret =  __mach_stack_logging_get_frames_for_stackid(mach_task_self(), get_stack_id_from_ptr(new_ptr), frames, MAX_FRAMES, &frames_count, NULL);
+	
+	EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_get_frames = %d\n", (int) ret);
+	EXPECT_TRUE(frames_count > 0, "number of frames returned from __mach_stack_logging_get_frames = %u\n", frames_count);
+
+	free(new_ptr);
+}
+
+static void
+test_realloc_after_lite_mode_turned_off(char *lite_ptr, char *non_lite_ptr)
+{
+	// make sure realloc works for both ptrs - do twice to test after ptr gets out of the lite zone
+	char *new_lite_ptr = realloc(lite_ptr, 100);
+	EXPECT_TRUE(new_lite_ptr != NULL, "realloc of new_lite_ptr");
+	new_lite_ptr = realloc(new_lite_ptr, 200);
+	EXPECT_TRUE(new_lite_ptr != NULL, "realloc of new_lite_ptr");
+	
+	char *new_non_lite_ptr = realloc(non_lite_ptr, 100);
+	EXPECT_TRUE(new_non_lite_ptr != NULL, "realloc of new_non_lite_ptr");
+	new_non_lite_ptr = realloc(new_non_lite_ptr, 100);
+	EXPECT_TRUE(new_non_lite_ptr != NULL, "realloc of new_non_lite_ptr");
+	
+	free(new_lite_ptr);
+	free(new_non_lite_ptr);
+}
+
+static void
 do_test(stack_logging_mode_type mode, boolean_t validate_stacks, boolean_t nano_allocator_enabled, boolean_t lite_mode_enabled)
 {
 	printf("do_test. stack_logging_mode_type=%d validate_stacks=%d nano_allocator_enabled=%d\n", (int) mode, (int) validate_stacks, (int) nano_allocator_enabled);
@@ -426,6 +473,7 @@ do_test(stack_logging_mode_type mode, boolean_t validate_stacks, boolean_t nano_
 	malloc_zone_t *default_purgeable_zone = malloc_default_purgeable_zone();
 	
 	char *ptr = malloc(10);
+	char *non_lite_ptr = malloc(10);	// used in the realloc test later for lite mode
 	
 	malloc_zone_t *zone_from_ptr = malloc_zone_from_ptr(ptr);
 	EXPECT_EQ(zone_from_ptr, default_zone, "malloc_zone_from_ptr:%p default_zone:%p\n", zone_from_ptr, default_zone);
@@ -454,13 +502,19 @@ do_test(stack_logging_mode_type mode, boolean_t validate_stacks, boolean_t nano_
 	size_t ptr_size = default_zone->size(default_zone, ptr);
 	EXPECT_TRUE(ptr_size > 0, "ptr_size=%d\n", (int) ptr_size);
 	
-	free(ptr);
-	
 	boolean_t lite_mode = lite_mode_enabled;
 	
 	if (validate_stacks) {
 		kern_return_t ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
 		EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	}
+	
+	// lite mode test: check realloc on a ptr that was created pre-enabling lite mode
+	if (mode == stack_logging_mode_lite) {
+		// this will free the ptr
+		test_realloc_non_lite_ptr(ptr);
+	} else {
+		free(ptr);
 	}
 	
 	// test regular versions
@@ -506,18 +560,24 @@ do_test(stack_logging_mode_type mode, boolean_t validate_stacks, boolean_t nano_
 	
 	test_malloc_zone_functions(default_zone);
 	
-	ptr = malloc(10);
-	zone_from_ptr = malloc_zone_from_ptr(ptr);
+	char *lite_ptr = malloc(10);
+	zone_from_ptr = malloc_zone_from_ptr(lite_ptr);
 	EXPECT_EQ(zone_from_ptr, default_zone, "malloc_zone_from_ptr:%p default_zone:%p\n", zone_from_ptr, default_zone);
 
 	if (mode != stack_logging_mode_none) {
 		turn_off_stack_logging();
 	}
 	
-	zone_from_ptr = malloc_zone_from_ptr(ptr);
+	zone_from_ptr = malloc_zone_from_ptr(lite_ptr);
 	EXPECT_EQ(zone_from_ptr, default_zone, "malloc_zone_from_ptr:%p default_zone:%p\n", zone_from_ptr, default_zone);
 	
-	free(ptr);
+	if (mode == stack_logging_mode_lite) {
+		// this will free the ptrs
+		test_realloc_after_lite_mode_turned_off(lite_ptr, non_lite_ptr);
+	} else {
+		free(lite_ptr);
+		free(non_lite_ptr);
+	}
 	
 	test_pressure_relief(default_zone);
 	
@@ -534,6 +594,67 @@ do_test(stack_logging_mode_type mode, boolean_t validate_stacks, boolean_t nano_
 	}
 }
 
+static void 
+test_enable_disable_enable_msl(unsigned long enable_value_1, unsigned long enable_value_2, boolean_t vm_only)
+{
+	unsigned long event = enable_value_1;
+	// Turn on MSL malloc mode
+	malloc_memory_event_handler(event);
+	
+	char *ptrs[1];
+	ptrs[0] = malloc(10);
+	
+	boolean_t lite_mode;
+	boolean_t expected_lite_mode = (enable_value_1 == MEMORYSTATUS_ENABLE_MSL_LITE);
+	kern_return_t ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	EXPECT_TRUE(lite_mode == expected_lite_mode, "return from __mach_stack_logging_start_reading - lite_mode = %d", lite_mode);
+	
+	// check to see if malloc stacks are present
+	if (!vm_only) {
+		check_stacks(ptrs, 1, lite_mode);
+	}
+	
+	// Turn off malloc mode
+	event = MEMORYSTATUS_DISABLE_MSL;
+	malloc_memory_event_handler(event);
+	
+	// verify that the stacks are still there
+	// First have to clear any cached uniquing table, then check again
+	__mach_stack_logging_stop_reading(mach_task_self());
+	ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	EXPECT_TRUE(lite_mode == expected_lite_mode, "return from __mach_stack_logging_start_reading - lite_mode = %d", lite_mode);
+	
+	if (!vm_only) {
+		check_stacks(ptrs, 1, lite_mode);
+	}
+	
+	// now see if we can turn on malloc stack logging again
+	event = enable_value_2;
+	malloc_memory_event_handler(event);
+	
+	__mach_stack_logging_stop_reading(mach_task_self());
+	ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	EXPECT_TRUE(lite_mode == expected_lite_mode, "return from __mach_stack_logging_start_reading - lite_mode = %d", lite_mode);
+	
+	extern int stack_logging_enable_logging;
+	extern boolean_t is_stack_logging_lite_enabled(void);
+	
+	if (lite_mode && enable_value_1 == enable_value_2) {
+		EXPECT_TRUE(is_stack_logging_lite_enabled(), "is_stack_logging_lite_enabled() = %d", is_stack_logging_lite_enabled());
+	} else {
+		int expected_stack_logging_enable_logging = (enable_value_1 == enable_value_2);
+		EXPECT_TRUE(expected_stack_logging_enable_logging == stack_logging_enable_logging, "stack_logging_enable_logging = %d", stack_logging_enable_logging);
+	}
+	
+	if (!vm_only) {
+		check_stacks(ptrs, 1, lite_mode);
+	}
+	
+	free(ptrs[0]);
+}
 
 #if DARWINTEST
 
@@ -697,7 +818,7 @@ T_DECL(msl_test_serialize_uniquing_table, "Test that that stack uniquing table c
 	kr  = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
 	T_ASSERT_MACH_SUCCESS(kr, "start reading");
 
-	kr = __mach_stack_logging_frames_for_uniqued_stack(mach_task_self(), stackid, frames1, STACK_LOGGING_MAX_STACK_SIZE, &count1);
+	kr = __mach_stack_logging_get_frames_for_stackid(mach_task_self(), stackid, frames1, STACK_LOGGING_MAX_STACK_SIZE, &count1, NULL);
 	T_ASSERT_MACH_SUCCESS(kr, "get frames");
 	T_ASSERT_TRUE(count1 > 0, "frames not empty");
 
@@ -730,6 +851,181 @@ T_DECL(msl_test_serialize_uniquing_table, "Test that that stack uniquing table c
 	__mach_stack_logging_uniquing_table_release(table);
 	free(foo);
 	__mach_stack_logging_stop_reading(mach_task_self());
+}
+
+static vm_address_t
+__attribute__((noinline))
+allocate() {
+	vm_address_t region = 0;
+	vm_allocate(mach_task_self(), &region, 0x1000, VM_FLAGS_ANYWHERE);
+	return region;
+}
+
+static void
+__attribute__((noinline))
+allocate_end() {
+}
+
+static
+void
+do_test_msl_vmlite()
+{
+	vm_address_t region = allocate();
+
+	T_ASSERT_NOTNULL(region, "allocated region");
+
+	boolean_t lite_mode;
+	kern_return_t kr  = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	T_ASSERT_MACH_SUCCESS(kr, "start reading");
+
+	T_ASSERT_TRUE(lite_mode, "check lite mode");
+
+	uint64_t stackid = __mach_stack_logging_stackid_for_vm_region(mach_task_self(), region);
+
+	T_EXPECT_FALSE(stackid == -1, "check that stackid is valid");
+
+	mach_vm_address_t frames[512];
+	uint32_t count =0;
+	bool last_frame_is_threadid;
+	kr = __mach_stack_logging_get_frames_for_stackid(mach_task_self(), stackid, frames, sizeof(frames)/sizeof(frames[0]), &count, &last_frame_is_threadid);
+	T_ASSERT_MACH_SUCCESS(kr, "get frames");
+
+	T_LOG("allocate = %llx", (long long)(uintptr_t)allocate);
+	T_LOG("allocate_end = %llx", (long long)(uintptr_t)allocate_end);
+
+	bool found = false;
+	for (uint32_t i = 0; i < count; i++)  {
+		T_LOG("frames[%d] = %llx", (int)i, frames[i]);
+		if (frames[i] >= (uintptr_t)allocate && frames[i] < (uintptr_t)allocate_end) {
+			T_LOG("found!");
+			found = true;
+		}
+	}
+
+	T_EXPECT_TRUE(found, "found allocate() in the frames");
+
+	vm_deallocate(mach_task_self(), region, 0x1000);
+
+	__mach_stack_logging_stop_reading(mach_task_self());
+
+}
+
+T_DECL(msl_vmlite, "test that we can read stack logs for VM region in lite mode", T_META_ENVVAR("MallocStackLogging=lite"))
+{
+	do_test_msl_vmlite();
+}
+
+
+T_DECL(msl_vmlite_no_env, "like msl_vmlite but we turn on stack logging with a function call ")
+{
+	turn_on_stack_logging(stack_logging_mode_lite);
+	do_test_msl_vmlite();
+}
+
+T_DECL(msl_vmlite_stress, "stress test for VM region in lite mode", T_META_ENVVAR("MallocStackLogging=lite"))
+{
+	vm_size_t size = 0xff00000;
+	vm_size_t minsize = 0x1000;
+	vm_address_t region;
+	vm_allocate(mach_task_self(), &region, size, VM_FLAGS_ANYWHERE);
+	T_EXPECT_TRUE(region != 0, "allocated region %llx", (long long) region);
+	for (vm_address_t addr = region; addr < region + size; addr += minsize) {
+		vm_size_t index = (addr - region) / minsize;
+		if (index % 2) {
+			//T_LOG("deallocate %llx", (long long)addr);
+			vm_deallocate(mach_task_self(), addr, minsize);
+		}
+	}
+	for (vm_address_t addr = region; addr < region + size; addr += minsize) {
+		vm_size_t index = (addr - region) / minsize;
+		if (!(index % 2)) {
+			//T_LOG("deallocate %llx", (long long)addr);
+			vm_deallocate(mach_task_self(), addr, minsize);
+		}
+	}
+
+	;
+
+	vm_address_t regions[5000];
+	for (int i = 0; i < sizeof(regions)/sizeof(regions[0]); i++) {
+		vm_allocate(mach_task_self(), &regions[i], minsize, VM_FLAGS_ANYWHERE);
+		T_QUIET;
+		T_EXPECT_TRUE(regions[i] != 0, "allocation succeeded %llx", (long long) regions[i]);
+	}
+	for (int i = 0; i < sizeof(regions)/sizeof(regions[0]); i++) {
+		vm_deallocate(mach_task_self(), regions[i], minsize);
+	}
+
+	T_END;
+}
+
+#if TARGET_OS_OSX
+T_DECL(msl_test_malloc_memory_event_handler, "Test the memory event handler")
+{
+	unsigned long event = NOTE_MEMORYSTATUS_PROC_LIMIT_WARN;
+	// Trigger a memory resource exception warning
+	malloc_memory_event_handler(event);
+	
+	char *ptrs[1];
+	ptrs[0] = malloc(10);
+	
+	boolean_t lite_mode;
+	kern_return_t ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	EXPECT_TRUE(ret == KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	EXPECT_TRUE(lite_mode, "return from __mach_stack_logging_start_reading - lite_mode = %d", lite_mode);
+	
+	// check to see if malloc stacks are present
+	check_stacks(ptrs, 1, true);
+	
+	// enter critical, should turn off stack logging and delete stack table
+	event = NOTE_MEMORYSTATUS_PROC_LIMIT_CRITICAL;
+	malloc_memory_event_handler(event);
+	
+	// verify that there are no stacks
+	// First have to clear any cached uniquing table, then check again
+	__mach_stack_logging_stop_reading(mach_task_self());
+	ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	EXPECT_TRUE(ret != KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	__mach_stack_logging_stop_reading(mach_task_self());
+	
+	// now see if we can turn on malloc stack logging via the MSL commands - this should fail
+	event = MEMORYSTATUS_ENABLE_MSL_MALLOC;
+	malloc_memory_event_handler(event);
+	ret = __mach_stack_logging_start_reading(mach_task_self(), __mach_stack_logging_shared_memory_address, &lite_mode);
+	EXPECT_TRUE(ret != KERN_SUCCESS, "return from __mach_stack_logging_start_reading = %d", ret);
+	
+	free(ptrs[0]);
+}
+#endif
+
+T_DECL(msl_test_enable_disable_msl_malloc_malloc, "Test enabling and disabling msl. malloc:malloc")
+{
+	test_enable_disable_enable_msl(MEMORYSTATUS_ENABLE_MSL_MALLOC, MEMORYSTATUS_ENABLE_MSL_MALLOC, false);
+}
+
+T_DECL(msl_test_enable_disable_msl_vm_vm, "Test enabling and disabling msl. vm:vm")
+{
+	test_enable_disable_enable_msl(MEMORYSTATUS_ENABLE_MSL_VM, MEMORYSTATUS_ENABLE_MSL_VM, true);
+}
+
+T_DECL(msl_test_enable_disable_msl_all, "Test enabling and disabling msl. all:all")
+{
+	test_enable_disable_enable_msl(MEMORYSTATUS_ENABLE_MSL_MALLOC | MEMORYSTATUS_ENABLE_MSL_VM, MEMORYSTATUS_ENABLE_MSL_MALLOC | MEMORYSTATUS_ENABLE_MSL_VM, false);
+}
+
+T_DECL(msl_test_enable_disable_msl_lite_lite, "Test enabling and disabling msl. lite:lite")
+{
+	test_enable_disable_enable_msl(MEMORYSTATUS_ENABLE_MSL_LITE, MEMORYSTATUS_ENABLE_MSL_LITE, false);
+}
+
+T_DECL(msl_test_enable_disable_msl_lite_malloc, "Test enabling and disabling msl. lite:malloc")
+{
+	test_enable_disable_enable_msl(MEMORYSTATUS_ENABLE_MSL_LITE, MEMORYSTATUS_ENABLE_MSL_MALLOC, false);
+}
+
+T_DECL(msl_test_enable_disable_msl_malloc_lite, "Test enabling and disabling msl. malloc:lite")
+{
+	test_enable_disable_enable_msl(MEMORYSTATUS_ENABLE_MSL_LITE, MEMORYSTATUS_ENABLE_MSL_MALLOC, false);
 }
 
 

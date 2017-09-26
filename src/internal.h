@@ -78,7 +78,7 @@ static size_t _platform_strlcpy(char * restrict dst, const char * restrict src, 
 #include <unistd.h>
 #include <xlocale.h>
 
-#include "magmallocProvider.h"
+#include "dtrace.h"
 
 #include "base.h"
 #include "trace.h"
@@ -97,7 +97,9 @@ static size_t _platform_strlcpy(char * restrict dst, const char * restrict src, 
 #include "stack_logging.h"
 #include "stack_logging_internal.h"
 #include "thresholds.h"
+#include "vm.h"
 
+#include "magazine_rack.h"
 #include "magazine_zone.h"
 #include "nano_zone.h"
 
@@ -115,5 +117,9 @@ malloc_error_break(void);
 MALLOC_NOEXPORT MALLOC_NOINLINE MALLOC_USED
 int
 malloc_gdb_po_unsafe(void);
+
+MALLOC_NOEXPORT
+extern uint64_t max_lite_mallocs;
+
 
 #endif // __INTERNAL_H

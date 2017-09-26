@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2016 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,28 +21,33 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef __NANO_MALLOC_H
-#define __NANO_MALLOC_H
+#ifndef __MAGAZINE_TESTING
+#define __MAGAZINE_TESTING
 
-#define MALLOC_HELPER_ZONE_STRING "MallocHelperZone"
+// Import the mvm_* functions for magazines to use
+#import "../src/vm.c"
 
-// Forward decl for the nanozone.
-typedef struct nanozone_s nanozone_t;
+#import "../src/magazine_rack.c"
 
-// Nano malloc enabled flag
-MALLOC_NOEXPORT
-extern boolean_t _malloc_engaged_nano;
+boolean_t
+malloc_tracing_enabled = 0;
 
-MALLOC_NOEXPORT
-malloc_zone_t *
-create_nano_zone(size_t initial_size, malloc_zone_t *helper_zone, unsigned debug_flags);
+// Stub out cross-file depedencies so that they just assert.
+void _malloc_printf(int flags, const char *fmt, ...)
+{
+	__builtin_trap();
+}
 
-MALLOC_NOEXPORT
 void
-nano_forked_zone(nanozone_t *nanozone);
+szone_free(szone_t *szone, void *ptr)
+{
+	__builtin_trap();
+}
 
-MALLOC_NOEXPORT
-void
-nano_init(const char *envp[], const char *apple[]);
+void *
+szone_malloc(szone_t *szone, size_t size)
+{
+	__builtin_trap();
+}
 
-#endif // __NANO_MALLOC_H
+#endif // __MAGAZINE_TESTING
