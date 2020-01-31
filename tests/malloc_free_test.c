@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <malloc/malloc.h>
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 static inline void*
 t_malloc(size_t s)
 {

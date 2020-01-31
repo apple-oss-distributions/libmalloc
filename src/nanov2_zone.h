@@ -29,21 +29,21 @@
 #pragma mark -
 #pragma mark Address Structure
 
-#if TARGET_OS_OSX || TARGET_OS_SIMULATOR
+#if TARGET_OS_OSX || TARGET_OS_SIMULATOR || TARGET_OS_DRIVERKIT
 
 #define NANOV2_REGION_BITS		15
 #define NANOV2_ARENA_BITS		3
 #define NANOV2_BLOCK_BITS		12
 #define NANOV2_OFFSET_BITS		14
 
-#else // TARGET_OS_OSX || TARGET_OS_SIMULATOR
+#else // TARGET_OS_OSX || TARGET_OS_SIMULATOR || TARGET_OS_DRIVERKIT
 
 #define NANOV2_REGION_BITS		0
 #define NANOV2_ARENA_BITS		3
 #define NANOV2_BLOCK_BITS		12
 #define NANOV2_OFFSET_BITS		14
 
-#endif // TARGET_OS_OSX || TARGET_OS_SIMULATOR
+#endif // TARGET_OS_OSX || TARGET_OS_SIMULATOR || TARGET_OS_DRIVERKIT
 
 #if NANOV2_REGION_BITS > 0
 #define NANOV2_MULTIPLE_REGIONS	1
@@ -238,7 +238,7 @@ typedef struct {
 
 // Maximum number of currently active allocation blocks per size class.
 // Initially, the default is for each physical CPU to have a dedicated block.
-#define MAX_CURRENT_BLOCKS 16
+#define MAX_CURRENT_BLOCKS 64
 #define MAX_CURRENT_BLOCKS_MASK (MAX_CURRENT_BLOCKS - 1)
 MALLOC_STATIC_ASSERT(MAX_CURRENT_BLOCKS > 1 &&
 		!(MAX_CURRENT_BLOCKS & MAX_CURRENT_BLOCKS_MASK),

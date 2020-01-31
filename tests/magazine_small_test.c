@@ -11,6 +11,8 @@
 #include "../src/magazine_small.c"
 #include "magazine_testing.h"
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 static inline void
 test_rack_setup(rack_t *rack)
 {

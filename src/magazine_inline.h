@@ -87,7 +87,9 @@ calloc_get_size(size_t num_items, size_t size, size_t extra_size, size_t *total_
 static MALLOC_INLINE uintptr_t free_list_gen_checksum(uintptr_t ptr) MALLOC_ALWAYS_INLINE;
 static MALLOC_INLINE uintptr_t free_list_checksum_ptr(rack_t *rack, void *p) MALLOC_ALWAYS_INLINE;
 static MALLOC_INLINE void *free_list_unchecksum_ptr(rack_t *rack, inplace_union *ptr) MALLOC_ALWAYS_INLINE;
-static MALLOC_INLINE unsigned free_list_count(rack_t *rack, free_list_t ptr);
+static MALLOC_INLINE unsigned free_list_count(task_t task,
+		memory_reader_t reader, print_task_printer_t printer,
+		rack_t *mapped_rack, free_list_t ptr);
 
 static MALLOC_INLINE void recirc_list_extract(rack_t *rack, magazine_t *mag_ptr, region_trailer_t *node) MALLOC_ALWAYS_INLINE;
 static MALLOC_INLINE void recirc_list_splice_last(rack_t *rack, magazine_t *mag_ptr, region_trailer_t *node) MALLOC_ALWAYS_INLINE;
@@ -100,7 +102,7 @@ yield(void)
 }
 
 static MALLOC_INLINE kern_return_t
-_szone_default_reader(task_t task, vm_address_t address, vm_size_t size, void **ptr)
+_malloc_default_reader(task_t task, vm_address_t address, vm_size_t size, void **ptr)
 {
 	*ptr = (void *)address;
 	return 0;
@@ -215,13 +217,21 @@ free_list_gen_checksum(uintptr_t ptr)
 }
 
 static unsigned
-free_list_count(rack_t *rack, free_list_t ptr)
+free_list_count(task_t task, memory_reader_t reader,
+		print_task_printer_t printer, rack_t *mapped_rack, free_list_t ptr)
 {
-	unsigned count = 0;
+	unsigned int count = 0;
 
+	// ptr.p is always pointer in the *target* process address space.
+	inplace_free_entry_t mapped_inplace_free_entry;
 	while (ptr.p) {
 		count++;
-		ptr.p = free_list_unchecksum_ptr(rack, &ptr.inplace->next);
+		if (reader(task, (vm_address_t)ptr.inplace, sizeof(*ptr.inplace),
+				(void **)&mapped_inplace_free_entry)) {
+			printer("** invalid pointer in free list: %p\n", ptr.inplace);
+			break;
+		}
+		ptr.p = free_list_unchecksum_ptr(mapped_rack, &mapped_inplace_free_entry->next);
 	}
 	return count;
 }
@@ -277,6 +287,7 @@ recirc_list_extract(rack_t *rack, magazine_t *mag_ptr, region_trailer_t *node)
 		node->next->prev = node->prev;
 	}
 
+	node->next = node->prev = NULL;
 	mag_ptr->recirculation_entries--;
 }
 
@@ -441,7 +452,14 @@ static MALLOC_INLINE MALLOC_ALWAYS_INLINE
 unsigned int
 mag_max_magazines(void)
 {
-    return max_magazines;
+	return max_magazines;
+}
+
+static MALLOC_INLINE MALLOC_ALWAYS_INLINE
+unsigned int
+mag_max_medium_magazines(void)
+{
+	return max_medium_magazines;
 }
 
 #pragma mark mag lock
@@ -470,6 +488,34 @@ mag_lock_zine_for_region_trailer(magazine_t *magazines, region_trailer_t *traile
 	return mag_ptr;
 }
 
+#pragma mark Region Cookie
+
+extern uint64_t malloc_entropy[2];
+
+static uint32_t
+region_cookie(void)
+{
+	return (uint32_t)(malloc_entropy[0] >> 8) & 0xffff;
+}
+
+static MALLOC_INLINE void
+region_check_cookie(region_t region, region_trailer_t *trailer)
+{
+	if (trailer->region_cookie != region_cookie())
+	{
+		malloc_zone_error(MALLOC_ABORT_ON_ERROR, true,
+				"Region cookie corrupted for region %p (value is %x)\n",
+				region, trailer->region_cookie);
+		__builtin_unreachable();
+	}
+}
+
+static MALLOC_INLINE void
+region_set_cookie(region_trailer_t *trailer)
+{
+	trailer->region_cookie = region_cookie();
+}
+
 #pragma mark tiny allocator
 
 /*
@@ -490,8 +536,8 @@ tiny_region_for_ptr_no_lock(rack_t *rack, const void *ptr)
 /*
  * Obtain the size of a free tiny block (in msize_t units).
  */
-static msize_t
-get_tiny_free_size(const void *ptr)
+static MALLOC_INLINE msize_t
+get_tiny_free_size_offset(const void *ptr, off_t mapped_offset)
 {
 	void *next_block = (void *)((uintptr_t)ptr + TINY_QUANTUM);
 	void *region_end = TINY_REGION_END(TINY_REGION_FOR_PTR(ptr));
@@ -499,25 +545,33 @@ get_tiny_free_size(const void *ptr)
 	// check whether the next block is outside the tiny region or a block header
 	// if so, then the size of this block is one, and there is no stored size.
 	if (next_block < region_end) {
-		uint32_t *next_header = TINY_BLOCK_HEADER_FOR_PTR(next_block);
+		uint32_t *next_header = (uint32_t *)
+				((char *)TINY_BLOCK_HEADER_FOR_PTR(next_block) + mapped_offset);
 		msize_t next_index = TINY_INDEX_FOR_PTR(next_block);
 
 		if (!BITARRAY_BIT(next_header, next_index)) {
-			return TINY_FREE_SIZE(ptr);
+			return TINY_FREE_SIZE((uintptr_t)ptr + mapped_offset);
 		}
 	}
 	return 1;
 }
 
 static MALLOC_INLINE msize_t
-get_tiny_meta_header(const void *ptr, boolean_t *is_free)
+get_tiny_free_size(const void *ptr)
+{
+	return get_tiny_free_size_offset(ptr, 0);
+}
+
+static MALLOC_INLINE msize_t
+get_tiny_meta_header_offset(const void *ptr, off_t mapped_offset,
+		boolean_t *is_free)
 {
 	// returns msize and is_free
 	// may return 0 for the msize component (meaning 65536)
 	uint32_t *block_header;
 	msize_t index;
 
-	block_header = TINY_BLOCK_HEADER_FOR_PTR(ptr);
+	block_header = (uint32_t *)((char *)TINY_BLOCK_HEADER_FOR_PTR(ptr) + mapped_offset);
 	index = TINY_INDEX_FOR_PTR(ptr);
 
 	msize_t midx = (index >> 5) << 1;
@@ -528,7 +582,7 @@ get_tiny_meta_header(const void *ptr, boolean_t *is_free)
 	}
 	if (0 == (block_header[midx + 1] & mask)) { // if (!BITARRAY_BIT(in_use, index))
 		*is_free = 1;
-		return get_tiny_free_size(ptr);
+		return get_tiny_free_size_offset(ptr, mapped_offset);
 	}
 
 	// index >> 5 identifies the uint32_t to manipulate in the conceptually contiguous bits array
@@ -557,6 +611,39 @@ get_tiny_meta_header(const void *ptr, boolean_t *is_free)
 	return result;
 }
 
+static MALLOC_INLINE msize_t
+get_tiny_meta_header(const void *ptr, boolean_t *is_free)
+{
+	return get_tiny_meta_header_offset(ptr, 0, is_free);
+}
+
+#if CONFIG_RECIRC_DEPOT
+/**
+ * Returns true if a tiny region is below the emptiness threshold that allows it
+ * to be moved to the recirc depot.
+ */
+static MALLOC_INLINE boolean_t
+tiny_region_below_recirc_threshold(region_t region)
+{
+	region_trailer_t *trailer = REGION_TRAILER_FOR_TINY_REGION(region);
+	return trailer->bytes_used < DENSITY_THRESHOLD(TINY_REGION_PAYLOAD_BYTES);
+}
+
+/**
+ * Returns true if a tiny magazine has crossed the emptiness threshold that
+ * allows regions to be moved to the recirc depot.
+ */
+static MALLOC_INLINE boolean_t
+tiny_magazine_below_recirc_threshold(magazine_t *mag_ptr)
+{
+	size_t a = mag_ptr->num_bytes_in_magazine;	// Total bytes allocated to this magazine
+	size_t u = mag_ptr->mag_num_bytes_in_objects; // In use (malloc'd) from this magaqzine
+
+	return a - u > ((3 * TINY_REGION_PAYLOAD_BYTES) / 2)
+			&& u < DENSITY_THRESHOLD(a);
+}
+#endif // CONFIG_RECIRC_DEPOT
+
 #pragma mark small allocator
 
 /*
@@ -569,6 +656,58 @@ small_region_for_ptr_no_lock(rack_t *rack, const void *ptr)
 	rgnhdl_t r = hash_lookup_region_no_lock(rack->region_generation->hashed_regions,
 			rack->region_generation->num_regions_allocated, rack->region_generation->num_regions_allocated_shift,
 			SMALL_REGION_FOR_PTR(ptr));
+	return r ? *r : r;
+}
+
+#if CONFIG_RECIRC_DEPOT
+/**
+ * Returns true if a small region is below the emptiness threshold that allows
+ * it to be moved to the recirc depot.
+ */
+static MALLOC_INLINE boolean_t
+small_region_below_recirc_threshold(region_t region)
+{
+	region_trailer_t *trailer = REGION_TRAILER_FOR_SMALL_REGION(region);
+	return trailer->bytes_used < DENSITY_THRESHOLD(SMALL_REGION_PAYLOAD_BYTES);
+}
+
+/**
+ * Returns true if a small magazine has crossed the emptiness threshold that
+ * allows regions to be moved to the recirc depot.
+ */
+static MALLOC_INLINE boolean_t
+small_magazine_below_recirc_threshold(magazine_t *mag_ptr)
+{
+	size_t a = mag_ptr->num_bytes_in_magazine;	// Total bytes allocated to this magazine
+	size_t u = mag_ptr->mag_num_bytes_in_objects; // In use (malloc'd) from this magaqzine
+
+	return a - u > ((3 * SMALL_REGION_PAYLOAD_BYTES) / 2)
+			&& u < DENSITY_THRESHOLD(a);
+}
+#endif // CONFIG_RECIRC_DEPOT
+
+#pragma mark medium allocator
+/**
+ * Returns true if a small region is below the emptiness threshold that allows
+ * it to be moved to the recirc depot.
+ */
+static MALLOC_INLINE boolean_t
+medium_region_below_recirc_threshold(region_t region)
+{
+	region_trailer_t *trailer = REGION_TRAILER_FOR_MEDIUM_REGION(region);
+	return trailer->bytes_used < DENSITY_THRESHOLD(MEDIUM_REGION_PAYLOAD_BYTES);
+}
+
+/*
+ * medium_region_for_ptr_no_lock - Returns the medium region containing the pointer,
+ * or NULL if not found.
+ */
+static MALLOC_INLINE region_t
+medium_region_for_ptr_no_lock(rack_t *rack, const void *ptr)
+{
+	rgnhdl_t r = hash_lookup_region_no_lock(rack->region_generation->hashed_regions,
+			rack->region_generation->num_regions_allocated, rack->region_generation->num_regions_allocated_shift,
+			MEDIUM_REGION_FOR_PTR(ptr));
 	return r ? *r : r;
 }
 

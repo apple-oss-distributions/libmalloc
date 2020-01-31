@@ -215,6 +215,9 @@ local_memory: set to a contiguous chunk of memory; validity of local_memory is a
 typedef void vm_range_recorder_t(task_t, void *, unsigned type, vm_range_t *, unsigned);
     /* given a task and context, "records" the specified addresses */
 
+/* Print function for the print_task() operation. */
+typedef void print_task_printer_t(const char *fmt, ...);
+
 typedef struct malloc_introspection_t {
 	kern_return_t (* MALLOC_INTROSPECT_FN_PTR(enumerator))(task_t task, void *, unsigned type_mask, vm_address_t zone_address, memory_reader_t reader, vm_range_recorder_t recorder); /* enumerates all the malloc pointers in use */
 	size_t	(* MALLOC_INTROSPECT_FN_PTR(good_size))(malloc_zone_t *zone, size_t size);
@@ -236,7 +239,13 @@ typedef struct malloc_introspection_t {
     void	*enumerate_unavailable_without_blocks;   
 #endif /* __BLOCKS__ */
 	void	(* MALLOC_INTROSPECT_FN_PTR(reinit_lock))(malloc_zone_t *zone); /* Reinitialize zone locks, called only from atfork_child handler. Present in version >= 9. */
+	void	(* MALLOC_INTROSPECT_FN_PTR(print_task))(task_t task, unsigned level, vm_address_t zone_address, memory_reader_t reader, print_task_printer_t printer); /* debug print for another process. Present in version >= 11. */
+	void (* MALLOC_INTROSPECT_FN_PTR(task_statistics))(task_t task, vm_address_t zone_address, memory_reader_t reader, malloc_statistics_t *stats); /* Present in version >= 12 */
 } malloc_introspection_t;
+
+// The value of "level" when passed to print_task() that corresponds to
+// verbose passed to print()
+#define MALLOC_VERBOSE_PRINT_LEVEL	2
 
 extern void malloc_printf(const char *format, ...);
     /* Convenience for logging errors and warnings;

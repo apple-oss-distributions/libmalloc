@@ -199,7 +199,6 @@ bool operator!= (const ReplayAllocator<T1>&,
 typedef struct replay_malloc_magazine {
     uint64_t baseAddress;
     uint64_t extent;
-    uint32_t pages_resident;
     uint32_t pages_dirty;
 } *replay_malloc_magazine_t;
 

@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <malloc/malloc.h>
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 T_DECL(malloc_zone_batch, "malloc_zone_batch_malloc and malloc_zone_batch_free")
 {
 	const unsigned count = 10;

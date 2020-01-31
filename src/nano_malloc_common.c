@@ -46,7 +46,7 @@ static const char forced_mode[] = "forced";		// Force Nano V2 everywhere
 
 // The maximum number of per-CPU allocation regions to use for Nano.
 unsigned int nano_common_max_magazines;
-boolean_t nano_common_max_magazines_is_ncpu;
+boolean_t nano_common_max_magazines_is_ncpu = true;
 
 // Boot argument for nano_common_max_magazines
 static const char nano_max_magazines_boot_arg[] = "malloc_nano_max_magazines";
@@ -162,6 +162,11 @@ nano_common_configure(void)
 
 	// Environment variable overrides boot arg, unless it's not valid.
 	const char *flag = getenv("MallocNanoMaxMagazines");
+#if RDAR_48993662
+	if (!flag) {
+		flag = getenv("_MallocNanoMaxMagazines");
+	}
+#endif // RDAR_48993662
 	if (flag) {
 		int value = (int)strtol(flag, NULL, 0);
 		if (value < 0) {
@@ -289,11 +294,17 @@ nano_common_default_reader(task_t task, vm_address_t address, vm_size_t size,
 void
 nano_common_cpu_number_override_set()
 {
+	boolean_t is_ncpu = _os_cpu_number_override == -1 && nano_common_max_magazines == phys_ncpus;
+	
 	// This facilitates a shortcut in nanov2_get_allocation_block_index() --
 	// if nano_common_max_magazines_is_ncpu is true, we can also assume that
 	// _os_cpu_number_override == -1 (i.e. we are not in malloc_replay).
-	nano_common_max_magazines_is_ncpu = _os_cpu_number_override == -1 &&
-			nano_common_max_magazines == phys_ncpus;
+	//
+	// We check here for false, because we don't want to write "true" to a __DATA page because
+	// that would make it dirty: <rdar://problem/46994833>
+	if (!is_ncpu) {
+		nano_common_max_magazines_is_ncpu = is_ncpu;
+	}
 }
 
 #endif // CONFIG_NANOZONE

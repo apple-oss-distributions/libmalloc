@@ -193,6 +193,16 @@ malloc_report(uint32_t flags, const char *fmt, ...)
 	va_end(ap);
 }
 
+MALLOC_NOEXPORT void
+malloc_report_simple(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	malloc_vreport(MALLOC_REPORT_NOLOG | MALLOC_REPORT_NOPREFIX,
+			_malloc_default_debug_sleep_time(), NULL, NULL, fmt, ap);
+	va_end(ap);
+}
+
 #pragma mark -
 #pragma mark Zone Error Reporing
 

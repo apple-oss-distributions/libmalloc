@@ -53,6 +53,12 @@
 MALLOC_NOEXPORT MALLOC_NOINLINE void
 malloc_report(uint32_t flags, const char *fmt, ...) __printflike(2,3);
 
+// Like malloc_report(), but does not send the text to _simple_asl_log() and
+// does not write the program name, pid and thread identifier before the report
+// text. Equivalent to malloc_report(MALLOC_REPORT_NOLOG|MALLOC_REPORT_NO_PREFIX)
+MALLOC_NOEXPORT MALLOC_NOINLINE void
+malloc_report_simple(const char *fmt, ...) __printflike(1,2);
+
 // Like malloc_report(), but precedes the output message with prefix_msg
 // as a format string using prefix_arg as a single substition parameter,
 // allows the length of time to sleep while reporting an error to be

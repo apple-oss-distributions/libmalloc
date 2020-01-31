@@ -27,7 +27,8 @@
 .Nm malloc ,
 .Nm realloc ,
 .Nm reallocf ,
-.Nm valloc
+.Nm valloc ,
+.Nm aligned_alloc
 .Nd memory allocation
 .Sh SYNOPSIS
 .In stdlib.h
@@ -58,6 +59,11 @@
 .Fo valloc
 .Fa "size_t size"
 .Fc
+.Ft void *
+.Fo aligned_alloc
+.Fa "size_t alignment"
+.Fa "size_t size"
+.Fc
 .Sh DESCRIPTION
 The
 .Fn malloc ,
@@ -69,6 +75,9 @@ and
 functions allocate memory.
 The allocated memory is aligned such that it can be used for any data type,
 including AltiVec- and SSE-related types.
+The
+.Fn aligned_alloc
+function allocates memory with the requested alignment.
 The
 .Fn free
 function frees allocations that were created via the preceding allocation
@@ -95,6 +104,14 @@ function allocates
 .Fa size
 bytes of memory and returns a pointer to the allocated memory.
 The allocated memory is aligned on a page boundary.
+.Pp
+The
+.Fn aligned_alloc
+function allocates
+.Fa size
+bytes of memory with an alignment specified by
+.Fa alignment
+and returns a pointer to the allocated memory.
 .Pp
 The
 .Fn realloc
@@ -154,8 +171,9 @@ If successful,
 .Fn malloc ,
 .Fn realloc ,
 .Fn reallocf ,
+.Fn valloc ,
 and
-.Fn valloc
+.Fn aligned_alloc
 functions return a pointer to allocated memory.
 If there is an error, they return a
 .Dv NULL
@@ -163,6 +181,23 @@ pointer and set
 .Va errno
 to
 .Er ENOMEM .
+.Pp
+In addition,
+.Fn aligned_alloc
+returns a
+.Dv NULL
+pointer and sets
+.Va errno
+to
+.Er EINVAL
+if
+.Fa size
+is not an integral multiple of
+.Fa alignment ,
+or if
+.Fa alignment
+is not a power of 2 at least as large as
+.Fn sizeof "void *" .
 .Pp
 For
 .Fn realloc ,

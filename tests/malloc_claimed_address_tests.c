@@ -10,10 +10,11 @@
 #include <stdio.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#include <malloc.h>
 #include <malloc/malloc.h>
 #include <malloc_private.h>
 #include <sys/mman.h>
+
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 T_DECL(malloc_claimed_address_default_zone_test,
 		"Tests for malloc_claimed_address, default zone only",
@@ -197,6 +198,16 @@ T_DECL(malloc_claimed_address_nanozone_test,
 		T_EXPECT_TRUE(result, "nano allocation size %d offset %d", (int)sz, (int)sz/2);
 		free(ptr);
 	}
+
+	// Allocate a non-Nano size, which Nano will pass to its helper zone.
+	// Verify that it still claims the address as valid when asked via the
+	// default zone.
+	void *ptr = malloc(512);
+	result = malloc_claimed_address(ptr);
+	T_EXPECT_TRUE(result, "Above nano pointer check");
+	result = malloc_zone_claimed_address(malloc_default_zone(), ptr);
+	T_EXPECT_TRUE(result, "Above nano pointer check via default zone");
+	free(ptr);
 
 	// Allocate some memory with vm_allocate() and make sure it's not claimed.
 	mach_vm_address_t addr;

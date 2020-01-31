@@ -85,6 +85,8 @@ run_enumerator()
 
 static void *allocations[ALLOCATION_COUNT];
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 T_DECL(nano_active_test, "Test that Nano is activated",
 	   T_META_ENVVAR("MallocNanoZone=1"))
 {

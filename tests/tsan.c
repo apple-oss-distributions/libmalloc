@@ -3,6 +3,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 T_DECL(tsan_sanity, "TSan Sanity Check", T_META_CHECK_LEAKS(NO))
 {
 	void *tsan_dylib = dlopen("@rpath/libclang_rt.tsan_osx_dynamic.dylib", RTLD_NOLOAD);

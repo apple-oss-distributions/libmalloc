@@ -11,6 +11,8 @@
 #include "../src/magazine_tiny.c"
 #include "magazine_testing.h"
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 static inline void
 test_rack_setup(rack_t *rack)
 {
@@ -63,7 +65,7 @@ T_DECL(basic_tiny_free, "tiny free")
 	T_ASSERT_NOTNULL(ptr, "allocation");
 
 	// free doesn't return an error (unless we assert here)
-	free_tiny(&rack, ptr, TINY_REGION_FOR_PTR(ptr), 0);
+	free_tiny(&rack, ptr, TINY_REGION_FOR_PTR(ptr), 0, false);
 
 	size_t sz = tiny_size(&rack, ptr);
 	T_ASSERT_EQ((int)sz, 0, "allocation freed (sz == 0)");
@@ -103,7 +105,7 @@ T_DECL(basic_tiny_realloc_in_place, "tiny rack realloc in place")
 	void *ptr2 = tiny_malloc_should_clear(&rack, TINY_MSIZE_FOR_BYTES(16), false);
 	T_ASSERT_NOTNULL(ptr2, "allocation 2");
 	T_ASSERT_EQ_PTR(ptr2, (void *)((uintptr_t)ptr + 16), "sequential allocations");
-	free_tiny(&rack, ptr2, TINY_REGION_FOR_PTR(ptr2), 0);
+	free_tiny(&rack, ptr2, TINY_REGION_FOR_PTR(ptr2), 0, false);
 
 	// Attempt to realloc up to 32 bytes, this should happen in place
 	// because of the death-row cache.
@@ -120,5 +122,5 @@ T_DECL(basic_tiny_realloc_in_place, "tiny rack realloc in place")
 	nsz = tiny_size(&rack, ptr);
 	T_ASSERT_EQ((int)nsz, 64, "realloc size == 64");
 
-	free_tiny(&rack, ptr, TINY_REGION_FOR_PTR(ptr), 0);
+	free_tiny(&rack, ptr, TINY_REGION_FOR_PTR(ptr), 0, false);
 }

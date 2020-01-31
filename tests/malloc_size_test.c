@@ -9,13 +9,15 @@
 #include <stdlib.h>
 #include <malloc/malloc.h>
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 static void
 test_malloc_size_valid(size_t min, size_t max, size_t incr)
 {
 	for (size_t sz = min; sz <= max; sz += incr) {
 		void *ptr = malloc(sz);
 		T_ASSERT_NOTNULL(ptr, "Allocate size %llu\n", (uint64_t)sz);
-		T_ASSERT_EQ(malloc_size(ptr), malloc_good_size(sz), "Check size value");
+		T_ASSERT_GE(malloc_size(ptr), malloc_good_size(sz), "Check size value");
 		free(ptr);
 	}
 }

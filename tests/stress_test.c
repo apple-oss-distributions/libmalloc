@@ -34,6 +34,8 @@
 
 #if DARWINTEST
 #include <darwintest.h>
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 #endif
 
 /* globals */

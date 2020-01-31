@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include "sanitizer/asan_interface.h"
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 T_DECL(asan_sanity, "ASan Sanity Check", T_META_CHECK_LEAKS(NO))
 {
 	const char *dylib_path =

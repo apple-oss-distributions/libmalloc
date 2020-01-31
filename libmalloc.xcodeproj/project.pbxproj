@@ -45,16 +45,23 @@
 			name = executables;
 			productName = executables;
 		};
+		E4B7FCB222000DAD0010A840 /* libmalloc_driverkit */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = E4B7FCBB22000DAD0010A840 /* Build configuration list for PBXAggregateTarget "libmalloc_driverkit" */;
+			buildPhases = (
+				E4B7FCBA22000DAD0010A840 /* Sanitise Headers (rdar://problem/10241868) */,
+			);
+			dependencies = (
+				E4B7FCB522000DAD0010A840 /* PBXTargetDependency */,
+			);
+			name = libmalloc_driverkit;
+			productName = libmalloc;
+		};
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
-		084F5E841D50204F006CD296 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 084F5E831D50204F006CD296 /* Foundation.framework */; };
-		084F5E851D502102006CD296 /* radix_tree_debug.c in Sources */ = {isa = PBXBuildFile; fileRef = 08C28B3A1D501ACC000AE997 /* radix_tree_debug.c */; };
-		088C4D771D1AF049005C6B36 /* radix_tree.c in Sources */ = {isa = PBXBuildFile; fileRef = 088C4D741D1AEFB5005C6B36 /* radix_tree.c */; };
-		088C4D841D1AF16F005C6B36 /* radix_tree.c in Sources */ = {isa = PBXBuildFile; fileRef = 088C4D741D1AEFB5005C6B36 /* radix_tree.c */; };
-		08FEED021D501F6B00BE8A69 /* radix_tree_main.m in Sources */ = {isa = PBXBuildFile; fileRef = 08C28B421D501D2C000AE997 /* radix_tree_main.m */; };
-		0D468DCF1C7BEF51006FACF5 /* magazine_lite.c in Sources */ = {isa = PBXBuildFile; fileRef = 0D468DCC1C7BEE56006FACF5 /* magazine_lite.c */; };
-		0D468DD01C7BEF71006FACF5 /* stack_logging_internal.h in Headers */ = {isa = PBXBuildFile; fileRef = 0D468DCD1C7BEE65006FACF5 /* stack_logging_internal.h */; };
+		08315122215ED9CF00D97E04 /* malloc_implementation.h in Headers */ = {isa = PBXBuildFile; fileRef = 08315121215ED9C700D97E04 /* malloc_implementation.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		08315123215EE9A100D97E04 /* stack_logging.h in Headers */ = {isa = PBXBuildFile; fileRef = C9571C391C18AA1D00A67EE3 /* stack_logging.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		2B67B5682040B3AF0003E78F /* _malloc.h in Headers */ = {isa = PBXBuildFile; fileRef = 2B67B5672040B3A50003E78F /* _malloc.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		3D157E7420354E02001630BF /* perfdata.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D157E7320354E02001630BF /* perfdata.framework */; };
 		3FE91FED16A90B9200D1238A /* bitarray.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD116A90A8D00D1238A /* bitarray.c */; };
@@ -62,18 +69,15 @@
 		3FE91FF116A90B9200D1238A /* magmallocProvider.d in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD716A90A8D00D1238A /* magmallocProvider.d */; };
 		3FE91FF216A90B9200D1238A /* malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD816A90A8D00D1238A /* malloc.c */; };
 		3FE91FF416A90B9200D1238A /* nano_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDA16A90A8D00D1238A /* nano_malloc.c */; };
-		3FE91FF616A90B9200D1238A /* stack_logging_disk.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */; };
 		3FE91FFA16A90BEF00D1238A /* malloc.h in Headers */ = {isa = PBXBuildFile; fileRef = 3FE91FF916A90BEF00D1238A /* malloc.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		3FE91FFF16A9109E00D1238A /* bitarray.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD116A90A8D00D1238A /* bitarray.c */; };
 		3FE9200116A9109E00D1238A /* magazine_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD616A90A8D00D1238A /* magazine_malloc.c */; };
 		3FE9200216A9109E00D1238A /* magmallocProvider.d in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD716A90A8D00D1238A /* magmallocProvider.d */; };
 		3FE9200316A9109E00D1238A /* malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD816A90A8D00D1238A /* malloc.c */; };
 		3FE9200416A9109E00D1238A /* nano_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDA16A90A8D00D1238A /* nano_malloc.c */; };
-		3FE9200616A9109E00D1238A /* stack_logging_disk.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */; };
 		925383DA1BD03D5100F745DB /* stress_test.c in Sources */ = {isa = PBXBuildFile; fileRef = 925383D11BD03B4A00F745DB /* stress_test.c */; };
 		B61341DE20114B660038D163 /* ktrace.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B61341DD20114B070038D163 /* ktrace.framework */; };
 		B629CF28202BA149007719B9 /* nanov2_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7FA41FCDD9A500BAD1AA /* nanov2_malloc.c */; };
-		B629CF2D202BB337007719B9 /* radix_tree.c in Sources */ = {isa = PBXBuildFile; fileRef = 088C4D741D1AEFB5005C6B36 /* radix_tree.c */; };
 		B629CF2E202BB337007719B9 /* bitarray.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD116A90A8D00D1238A /* bitarray.c */; };
 		B629CF2F202BB337007719B9 /* purgeable_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = C957429E1BF681B00027269A /* purgeable_malloc.c */; };
 		B629CF30202BB337007719B9 /* magazine_large.c in Sources */ = {isa = PBXBuildFile; fileRef = C957429B1BF672F80027269A /* magazine_large.c */; };
@@ -86,7 +90,6 @@
 		B629CF37202BB337007719B9 /* frozen_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = C95742A41BF6842F0027269A /* frozen_malloc.c */; };
 		B629CF38202BB337007719B9 /* nanov2_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7FA41FCDD9A500BAD1AA /* nanov2_malloc.c */; };
 		B629CF39202BB337007719B9 /* nano_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDA16A90A8D00D1238A /* nano_malloc.c */; };
-		B629CF3A202BB337007719B9 /* stack_logging_disk.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */; };
 		B629CF3B202BB337007719B9 /* magazine_tiny.c in Sources */ = {isa = PBXBuildFile; fileRef = C957428F1BF419DF0027269A /* magazine_tiny.c */; };
 		B629CF3C202BB337007719B9 /* nano_malloc_common.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7F9D1FCDCBC600BAD1AA /* nano_malloc_common.c */; };
 		B65FBE2C2087AA2F00E21F59 /* malloc_printf.c in Sources */ = {isa = PBXBuildFile; fileRef = B65FBE2B2087AA2F00E21F59 /* malloc_printf.c */; };
@@ -102,7 +105,6 @@
 		B68B7FA51FCDD9A500BAD1AA /* nanov2_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7FA41FCDD9A500BAD1AA /* nanov2_malloc.c */; };
 		B68B7FA61FCDD9B200BAD1AA /* nanov2_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7FA41FCDD9A500BAD1AA /* nanov2_malloc.c */; };
 		B68B7FA71FCDD9B200BAD1AA /* nanov2_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7FA41FCDD9A500BAD1AA /* nanov2_malloc.c */; };
-		B6910F67202B630D00FF2EB0 /* radix_tree.c in Sources */ = {isa = PBXBuildFile; fileRef = 088C4D741D1AEFB5005C6B36 /* radix_tree.c */; };
 		B6910F68202B630D00FF2EB0 /* bitarray.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD116A90A8D00D1238A /* bitarray.c */; };
 		B6910F69202B630D00FF2EB0 /* purgeable_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = C957429E1BF681B00027269A /* purgeable_malloc.c */; };
 		B6910F6A202B630D00FF2EB0 /* magazine_large.c in Sources */ = {isa = PBXBuildFile; fileRef = C957429B1BF672F80027269A /* magazine_large.c */; };
@@ -114,9 +116,9 @@
 		B6910F70202B630D00FF2EB0 /* malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD816A90A8D00D1238A /* malloc.c */; };
 		B6910F71202B630D00FF2EB0 /* frozen_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = C95742A41BF6842F0027269A /* frozen_malloc.c */; };
 		B6910F73202B630D00FF2EB0 /* nano_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDA16A90A8D00D1238A /* nano_malloc.c */; };
-		B6910F74202B630D00FF2EB0 /* stack_logging_disk.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */; };
 		B6910F75202B630D00FF2EB0 /* magazine_tiny.c in Sources */ = {isa = PBXBuildFile; fileRef = C957428F1BF419DF0027269A /* magazine_tiny.c */; };
 		B6910F76202B630D00FF2EB0 /* nano_malloc_common.c in Sources */ = {isa = PBXBuildFile; fileRef = B68B7F9D1FCDCBC600BAD1AA /* nano_malloc_common.c */; };
+		B6AFD93C214C6198007983DA /* msl_lite_support.c in Sources */ = {isa = PBXBuildFile; fileRef = B6AFD93B214C6198007983DA /* msl_lite_support.c */; };
 		B6CA644E1FCE2C1900DEBA12 /* nanov2_zone.h in Headers */ = {isa = PBXBuildFile; fileRef = B6CA644D1FCE2C0A00DEBA12 /* nanov2_zone.h */; };
 		B6CA644F1FCE2C1A00DEBA12 /* nanov2_zone.h in Headers */ = {isa = PBXBuildFile; fileRef = B6CA644D1FCE2C0A00DEBA12 /* nanov2_zone.h */; };
 		B6CA64501FCE2C1B00DEBA12 /* nanov2_zone.h in Headers */ = {isa = PBXBuildFile; fileRef = B6CA644D1FCE2C0A00DEBA12 /* nanov2_zone.h */; };
@@ -140,7 +142,6 @@
 		C0CE45381C52C90500C24048 /* malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FD816A90A8D00D1238A /* malloc.c */; };
 		C0CE45391C52C90500C24048 /* frozen_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = C95742A41BF6842F0027269A /* frozen_malloc.c */; };
 		C0CE453A1C52C90500C24048 /* nano_malloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDA16A90A8D00D1238A /* nano_malloc.c */; };
-		C0CE453C1C52C90500C24048 /* stack_logging_disk.c in Sources */ = {isa = PBXBuildFile; fileRef = 3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */; };
 		C0CE453D1C52C90500C24048 /* magazine_tiny.c in Sources */ = {isa = PBXBuildFile; fileRef = C957428F1BF419DF0027269A /* magazine_tiny.c */; };
 		C0CE45401C52C90500C24048 /* magazine_inline.h in Headers */ = {isa = PBXBuildFile; fileRef = C95742921BF41C970027269A /* magazine_inline.h */; };
 		C0CE45411C52C90500C24048 /* nano_zone.h in Headers */ = {isa = PBXBuildFile; fileRef = C957427E1BF33D130027269A /* nano_zone.h */; };
@@ -155,7 +156,11 @@
 		C932D2681D6B8D840063B19E /* vm.c in Sources */ = {isa = PBXBuildFile; fileRef = C932D2661D6B8D840063B19E /* vm.c */; };
 		C932D2691D6B8D840063B19E /* vm.h in Headers */ = {isa = PBXBuildFile; fileRef = C932D2671D6B8D840063B19E /* vm.h */; };
 		C938BBD31C74F7A400522BBD /* trace.h in Headers */ = {isa = PBXBuildFile; fileRef = C938BBD21C74F7A400522BBD /* trace.h */; };
-		C9571C3A1C18AA1D00A67EE3 /* stack_logging.h in Headers */ = {isa = PBXBuildFile; fileRef = C9571C391C18AA1D00A67EE3 /* stack_logging.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		C94B447821925CA50005EA6F /* magazine_medium.c in Sources */ = {isa = PBXBuildFile; fileRef = C94B447721925C990005EA6F /* magazine_medium.c */; };
+		C94B447921925CA60005EA6F /* magazine_medium.c in Sources */ = {isa = PBXBuildFile; fileRef = C94B447721925C990005EA6F /* magazine_medium.c */; };
+		C94B447A21925CA60005EA6F /* magazine_medium.c in Sources */ = {isa = PBXBuildFile; fileRef = C94B447721925C990005EA6F /* magazine_medium.c */; };
+		C94B447B21925CA70005EA6F /* magazine_medium.c in Sources */ = {isa = PBXBuildFile; fileRef = C94B447721925C990005EA6F /* magazine_medium.c */; };
+		C94B447C21925CA80005EA6F /* magazine_medium.c in Sources */ = {isa = PBXBuildFile; fileRef = C94B447721925C990005EA6F /* magazine_medium.c */; };
 		C95742721BF2C2880027269A /* bitarray.h in Headers */ = {isa = PBXBuildFile; fileRef = 3FE91FD216A90A8D00D1238A /* bitarray.h */; };
 		C95742731BF2C2880027269A /* internal.h in Headers */ = {isa = PBXBuildFile; fileRef = C957426D1BF2C0C80027269A /* internal.h */; };
 		C95742741BF2C2880027269A /* locking.h in Headers */ = {isa = PBXBuildFile; fileRef = C957426E1BF2C1480027269A /* locking.h */; };
@@ -255,6 +260,13 @@
 			remoteGlobalIDString = C0CE452F1C52C90500C24048;
 			remoteInfo = libmalloc_static;
 		};
+		E4B7FCB622000DAD0010A840 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3FFC1BE516A908F800027192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3FE91FE716A90AEC00D1238A;
+			remoteInfo = libsystem_malloc;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -280,18 +292,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		08315121215ED9C700D97E04 /* malloc_implementation.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = malloc_implementation.h; sourceTree = "<group>"; };
 		084F5E831D50204F006CD296 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
-		088C4D731D1AEFB5005C6B36 /* radix_tree_internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = radix_tree_internal.h; sourceTree = "<group>"; };
-		088C4D741D1AEFB5005C6B36 /* radix_tree.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = radix_tree.c; sourceTree = "<group>"; };
-		088C4D751D1AEFB5005C6B36 /* radix_tree.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = radix_tree.h; sourceTree = "<group>"; };
-		088C4D761D1AEFC5005C6B36 /* radix_tree_test.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = radix_tree_test.m; sourceTree = "<group>"; };
-		08C28B3A1D501ACC000AE997 /* radix_tree_debug.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = radix_tree_debug.c; sourceTree = "<group>"; };
-		08C28B401D501D2C000AE997 /* radix-tree */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "radix-tree"; sourceTree = BUILT_PRODUCTS_DIR; };
-		08C28B421D501D2C000AE997 /* radix_tree_main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = radix_tree_main.m; sourceTree = "<group>"; };
-		0D468DCC1C7BEE56006FACF5 /* magazine_lite.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = magazine_lite.c; sourceTree = "<group>"; };
-		0D468DCD1C7BEE65006FACF5 /* stack_logging_internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = stack_logging_internal.h; sourceTree = "<group>"; };
-		0D468DCE1C7BEE74006FACF5 /* stack_logging_test.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = stack_logging_test.c; sourceTree = "<group>"; };
+		086D54292159699B00A0ACD1 /* libSystem.B.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libSystem.B.tbd; path = usr/lib/libSystem.B.tbd; sourceTree = SDKROOT; };
 		2B67B5672040B3A50003E78F /* _malloc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = _malloc.h; sourceTree = "<group>"; };
+		2BED1E6A203E2F7700CB8C15 /* make_tapi_happy.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = make_tapi_happy.h; sourceTree = "<group>"; };
 		3D157E7320354E02001630BF /* perfdata.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = perfdata.framework; path = ../MacOSX10.14.Internal.sdk/System/Library/PrivateFrameworks/perfdata.framework; sourceTree = SDKROOT; };
 		3FC452FF18E4ABFE003D6A38 /* manpages.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = manpages.sh; sourceTree = "<group>"; };
 		3FE91FC916A90A8D00D1238A /* malloc.3 */ = {isa = PBXFileReference; lastKnownFileType = text; path = malloc.3; sourceTree = "<group>"; };
@@ -304,7 +309,6 @@
 		3FE91FD816A90A8D00D1238A /* malloc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = malloc.c; sourceTree = "<group>"; };
 		3FE91FD916A90A8D00D1238A /* printf.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = printf.h; sourceTree = "<group>"; };
 		3FE91FDA16A90A8D00D1238A /* nano_malloc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = nano_malloc.c; sourceTree = "<group>"; };
-		3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = stack_logging_disk.c; sourceTree = "<group>"; usesTabs = 1; };
 		3FE91FE016A90A8D00D1238A /* libmalloc.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libmalloc.xcconfig; sourceTree = "<group>"; };
 		3FE91FE116A90A8D00D1238A /* libmalloc_eos.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libmalloc_eos.xcconfig; sourceTree = "<group>"; };
 		3FE91FE316A90A8D00D1238A /* sanitise_headers.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = sanitise_headers.sh; sourceTree = "<group>"; };
@@ -313,6 +317,8 @@
 		3FE91FFB16A90E6C00D1238A /* legacy_malloc.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = legacy_malloc.h; sourceTree = "<group>"; };
 		3FE9201016A9109E00D1238A /* libmalloc_eOS.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libmalloc_eOS.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		456E51C9197DF0D600A7E488 /* libmalloc_stress_test */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libmalloc_stress_test; sourceTree = BUILT_PRODUCTS_DIR; };
+		875E02E32125B62300A7FE8A /* aligned_alloc_test.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = aligned_alloc_test.c; sourceTree = "<group>"; };
+		875E02E42125C1D100A7FE8A /* posix_memalign_test.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = posix_memalign_test.c; sourceTree = "<group>"; };
 		8CB962B01F7E9F610046942E /* asan.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = asan.c; sourceTree = "<group>"; };
 		8CB962B11F7E9FD00046942E /* tsan.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = tsan.c; sourceTree = "<group>"; };
 		925383D01BD03B4A00F745DB /* Makefile */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.make; path = Makefile; sourceTree = "<group>"; };
@@ -326,22 +332,27 @@
 		B64E100A205311DC004C4BA6 /* malloc_size_test.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = malloc_size_test.c; sourceTree = "<group>"; };
 		B6536A62204754B6005FBE22 /* perf_contended_malloc_free.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = perf_contended_malloc_free.c; sourceTree = "<group>"; };
 		B6536A6320475BA4005FBE22 /* basic_malloc_free_perf.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = basic_malloc_free_perf.c; sourceTree = "<group>"; };
+		B65A635D2252B3A000A95474 /* memory_pressure.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = memory_pressure.c; sourceTree = "<group>"; };
 		B65FBE2B2087AA2F00E21F59 /* malloc_printf.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = malloc_printf.c; sourceTree = "<group>"; };
 		B66AA658202A70B00019D607 /* libmalloc_resolved.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libmalloc_resolved.xcconfig; sourceTree = "<group>"; };
 		B66C71D72034BFAE0047E265 /* malloc_common.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = malloc_common.h; sourceTree = "<group>"; };
 		B66C71D82034BFAE0047E265 /* malloc_common.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = malloc_common.c; sourceTree = "<group>"; };
 		B670DABD2072D0BB00139A1D /* perf_realloc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = perf_realloc.c; sourceTree = "<group>"; };
 		B671CFFD207578CC00EEAF20 /* libmalloc.dirty */ = {isa = PBXFileReference; lastKnownFileType = text; path = libmalloc.dirty; sourceTree = "<group>"; };
+		B6726EC92092473D00E8AF5A /* malloc_heap_check_test.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = malloc_heap_check_test.c; sourceTree = "<group>"; };
 		B675F74520213D0A00B5038B /* nano_tests.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = nano_tests.c; sourceTree = "<group>"; };
 		B68B7F9C1FCDCBC600BAD1AA /* nano_malloc_common.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = nano_malloc_common.h; sourceTree = "<group>"; };
 		B68B7F9D1FCDCBC600BAD1AA /* nano_malloc_common.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = nano_malloc_common.c; sourceTree = "<group>"; };
 		B68B7FA21FCDD60F00BAD1AA /* nanov2_malloc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = nanov2_malloc.h; sourceTree = "<group>"; };
 		B68B7FA41FCDD9A500BAD1AA /* nanov2_malloc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = nanov2_malloc.c; sourceTree = "<group>"; };
+		B68C985C2180BEB5003DAF36 /* region_cookie_test.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = region_cookie_test.c; sourceTree = "<group>"; };
 		B6910F89202B630D00FF2EB0 /* libmalloc_mp.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libmalloc_mp.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		B69B2B941FB3D00500FD5A8F /* magazine_malloc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = magazine_malloc.c; sourceTree = "<group>"; };
 		B6A414EA1FBDF01C0038DC53 /* malloc_claimed_address_tests.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = malloc_claimed_address_tests.c; sourceTree = "<group>"; };
 		B6A494971F9918DD0016A799 /* calloc_test.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = calloc_test.c; sourceTree = "<group>"; };
 		B6A9C48C1F991716007D0853 /* malloc_free_test.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = malloc_free_test.c; sourceTree = "<group>"; };
+		B6AFD93B214C6198007983DA /* msl_lite_support.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = msl_lite_support.c; sourceTree = "<group>"; };
+		B6BE1D5D21BB120B00D5F315 /* MallocBenchTest */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MallocBenchTest; sourceTree = "<group>"; };
 		B6C1C9C720D9B70F002CCC0B /* nano_trace_replay.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = nano_trace_replay.c; sourceTree = "<group>"; };
 		B6CA644D1FCE2C0A00DEBA12 /* nanov2_zone.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = nanov2_zone.h; sourceTree = "<group>"; };
 		B6CA64511FCF1AAD00DEBA12 /* nano_zone_common.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = nano_zone_common.h; sourceTree = "<group>"; };
@@ -360,42 +371,8 @@
 		C932D2671D6B8D840063B19E /* vm.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = vm.h; sourceTree = "<group>"; };
 		C938BBD21C74F7A400522BBD /* trace.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = trace.h; sourceTree = "<group>"; };
 		C93F76D71D6B9F8C0088931B /* magazine_testing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = magazine_testing.h; sourceTree = "<group>"; };
+		C94B447721925C990005EA6F /* magazine_medium.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = magazine_medium.c; sourceTree = "<group>"; };
 		C9571C391C18AA1D00A67EE3 /* stack_logging.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = stack_logging.h; sourceTree = "<group>"; };
-		C9571C3C1C18AD5F00A67EE3 /* balloon.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = balloon.cpp; sourceTree = "<group>"; };
-		C9571C3D1C18AD5F00A67EE3 /* balloon.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = balloon.h; sourceTree = "<group>"; };
-		C9571C3E1C18AD5F00A67EE3 /* Benchmark.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Benchmark.cpp; sourceTree = "<group>"; };
-		C9571C3F1C18AD5F00A67EE3 /* Benchmark.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Benchmark.h; sourceTree = "<group>"; };
-		C9571C401C18AD5F00A67EE3 /* big.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = big.cpp; sourceTree = "<group>"; };
-		C9571C411C18AD5F00A67EE3 /* big.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = big.h; sourceTree = "<group>"; };
-		C9571C421C18AD5F00A67EE3 /* churn.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = churn.cpp; sourceTree = "<group>"; };
-		C9571C431C18AD5F00A67EE3 /* churn.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = churn.h; sourceTree = "<group>"; };
-		C9571C441C18AD5F00A67EE3 /* CommandLine.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CommandLine.cpp; sourceTree = "<group>"; };
-		C9571C451C18AD5F00A67EE3 /* CommandLine.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CommandLine.h; sourceTree = "<group>"; };
-		C9571C461C18AD5F00A67EE3 /* CPUCount.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CPUCount.cpp; sourceTree = "<group>"; };
-		C9571C471C18AD5F00A67EE3 /* CPUCount.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CPUCount.h; sourceTree = "<group>"; };
-		C9571C4C1C18AD5F00A67EE3 /* fragment.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = fragment.cpp; sourceTree = "<group>"; };
-		C9571C4D1C18AD5F00A67EE3 /* fragment.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = fragment.h; sourceTree = "<group>"; };
-		C9571C4E1C18AD5F00A67EE3 /* Interpreter.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Interpreter.cpp; sourceTree = "<group>"; };
-		C9571C4F1C18AD5F00A67EE3 /* Interpreter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Interpreter.h; sourceTree = "<group>"; };
-		C9571C501C18AD5F00A67EE3 /* list.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = list.cpp; sourceTree = "<group>"; };
-		C9571C511C18AD5F00A67EE3 /* list.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = list.h; sourceTree = "<group>"; };
-		C9571C521C18AD5F00A67EE3 /* mbmalloc.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = mbmalloc.cpp; sourceTree = "<group>"; };
-		C9571C531C18AD5F00A67EE3 /* mbmalloc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = mbmalloc.h; sourceTree = "<group>"; };
-		C9571C541C18AD5F00A67EE3 /* medium.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = medium.cpp; sourceTree = "<group>"; };
-		C9571C551C18AD5F00A67EE3 /* medium.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = medium.h; sourceTree = "<group>"; };
-		C9571C561C18AD5F00A67EE3 /* memalign.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = memalign.cpp; sourceTree = "<group>"; };
-		C9571C571C18AD5F00A67EE3 /* memalign.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = memalign.h; sourceTree = "<group>"; };
-		C9571C581C18AD5F00A67EE3 /* message.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = message.cpp; sourceTree = "<group>"; };
-		C9571C591C18AD5F00A67EE3 /* message.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = message.h; sourceTree = "<group>"; };
-		C9571C5A1C18AD5F00A67EE3 /* realloc.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = realloc.cpp; sourceTree = "<group>"; };
-		C9571C5B1C18AD5F00A67EE3 /* realloc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = realloc.h; sourceTree = "<group>"; };
-		C9571C5E1C18AD5F00A67EE3 /* stress_aligned.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = stress_aligned.cpp; sourceTree = "<group>"; };
-		C9571C5F1C18AD5F00A67EE3 /* stress_aligned.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stress_aligned.h; sourceTree = "<group>"; };
-		C9571C601C18AD5F00A67EE3 /* stress.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = stress.cpp; sourceTree = "<group>"; };
-		C9571C611C18AD5F00A67EE3 /* stress.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stress.h; sourceTree = "<group>"; };
-		C9571C641C18AD5F00A67EE3 /* tree.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = tree.cpp; sourceTree = "<group>"; };
-		C9571C651C18AD5F00A67EE3 /* tree.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = tree.h; sourceTree = "<group>"; };
-		C9571C661C18AD6A00A67EE3 /* MallocBench.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MallocBench.cpp; sourceTree = "<group>"; };
 		C957426D1BF2C0C80027269A /* internal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = internal.h; sourceTree = "<group>"; };
 		C957426E1BF2C1480027269A /* locking.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = locking.h; sourceTree = "<group>"; };
 		C95742791BF2C5F40027269A /* nano_malloc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = nano_malloc.h; sourceTree = "<group>"; };
@@ -423,14 +400,6 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		08C28B3D1D501D2C000AE997 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				084F5E841D50204F006CD296 /* Foundation.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		3FE91FE516A90AEC00D1238A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -488,6 +457,7 @@
 		084F5E821D50204F006CD296 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				086D54292159699B00A0ACD1 /* libSystem.B.tbd */,
 				3D157E7320354E02001630BF /* perfdata.framework */,
 				B61341DD20114B070038D163 /* ktrace.framework */,
 				084F5E831D50204F006CD296 /* Foundation.framework */,
@@ -498,7 +468,6 @@
 		08C28B411D501D2C000AE997 /* tools */ = {
 			isa = PBXGroup;
 			children = (
-				08C28B421D501D2C000AE997 /* radix_tree_main.m */,
 				B6D2ED552007D91A007AF994 /* malloc_replay.cpp */,
 				B6D2ED562007D91A007AF994 /* malloc_replay.h */,
 			);
@@ -519,10 +488,6 @@
 		3FE91FCC16A90A8D00D1238A /* src */ = {
 			isa = PBXGroup;
 			children = (
-				08C28B3A1D501ACC000AE997 /* radix_tree_debug.c */,
-				088C4D731D1AEFB5005C6B36 /* radix_tree_internal.h */,
-				088C4D741D1AEFB5005C6B36 /* radix_tree.c */,
-				088C4D751D1AEFB5005C6B36 /* radix_tree.h */,
 				C95742891BF3FD290027269A /* base.h */,
 				3FE91FD116A90A8D00D1238A /* bitarray.c */,
 				3FE91FD216A90A8D00D1238A /* bitarray.h */,
@@ -537,12 +502,12 @@
 				C957426E1BF2C1480027269A /* locking.h */,
 				C95742921BF41C970027269A /* magazine_inline.h */,
 				C957429B1BF672F80027269A /* magazine_large.c */,
-				0D468DCC1C7BEE56006FACF5 /* magazine_lite.c */,
 				3FE91FD616A90A8D00D1238A /* magazine_malloc.c */,
 				C95742951BF41E480027269A /* magazine_malloc.h */,
 				B65FBE2B2087AA2F00E21F59 /* malloc_printf.c */,
 				C99E32091D6F7366005655A8 /* magazine_rack.c */,
 				C99E320A1D6F7366005655A8 /* magazine_rack.h */,
+				C94B447721925C990005EA6F /* magazine_medium.c */,
 				C95742981BF670D00027269A /* magazine_small.c */,
 				C957428F1BF419DF0027269A /* magazine_tiny.c */,
 				C95742861BF3F9550027269A /* magazine_zone.h */,
@@ -550,6 +515,7 @@
 				3FE91FD816A90A8D00D1238A /* malloc.c */,
 				B66C71D82034BFAE0047E265 /* malloc_common.c */,
 				B66C71D72034BFAE0047E265 /* malloc_common.h */,
+				B6AFD93B214C6198007983DA /* msl_lite_support.c */,
 				B68B7F9D1FCDCBC600BAD1AA /* nano_malloc_common.c */,
 				B68B7F9C1FCDCBC600BAD1AA /* nano_malloc_common.h */,
 				3FE91FDA16A90A8D00D1238A /* nano_malloc.c */,
@@ -563,8 +529,6 @@
 				3FE91FD916A90A8D00D1238A /* printf.h */,
 				C957429E1BF681B00027269A /* purgeable_malloc.c */,
 				C957429F1BF681B00027269A /* purgeable_malloc.h */,
-				3FE91FDC16A90A8D00D1238A /* stack_logging_disk.c */,
-				0D468DCD1C7BEE65006FACF5 /* stack_logging_internal.h */,
 				C957428C1BF411330027269A /* thresholds.h */,
 				C938BBD21C74F7A400522BBD /* trace.h */,
 				C932D2661D6B8D840063B19E /* vm.c */,
@@ -603,7 +567,6 @@
 				3FE9201016A9109E00D1238A /* libmalloc_eOS.a */,
 				456E51C9197DF0D600A7E488 /* libmalloc_stress_test */,
 				C0CE454C1C52C90500C24048 /* libmalloc.a */,
-				08C28B401D501D2C000AE997 /* radix-tree */,
 				B6D2ED512007D76F007AF994 /* libmalloc_replay */,
 				B6910F89202B630D00FF2EB0 /* libmalloc_mp.a */,
 				B629CF42202BB337007719B9 /* libmalloc_alt.a */,
@@ -650,28 +613,30 @@
 		925383BD1BD03B4A00F745DB /* tests */ = {
 			isa = PBXGroup;
 			children = (
+				B6BE1D5D21BB120B00D5F315 /* MallocBenchTest */,
 				8CB962B01F7E9F610046942E /* asan.c */,
 				8CB962B11F7E9FD00046942E /* tsan.c */,
 				C931B58F1C81248100D0D230 /* madvise.c */,
 				C9F8C2691D74C93A008C4044 /* magazine_rack.c */,
 				B6A494971F9918DD0016A799 /* calloc_test.c */,
 				B6A9C48C1F991716007D0853 /* malloc_free_test.c */,
+				875E02E32125B62300A7FE8A /* aligned_alloc_test.c */,
+				875E02E42125C1D100A7FE8A /* posix_memalign_test.c */,
 				B6A414EA1FBDF01C0038DC53 /* malloc_claimed_address_tests.c */,
+				B6726EC92092473D00E8AF5A /* malloc_heap_check_test.c */,
 				C9F8C2681D70B521008C4044 /* magazine_small_test.c */,
 				B64E100A205311DC004C4BA6 /* malloc_size_test.c */,
 				C93F76D71D6B9F8C0088931B /* magazine_testing.h */,
 				C932D2631D6B6ED40063B19E /* magazine_tiny_test.c */,
 				B69B2B941FB3D00500FD5A8F /* magazine_malloc.c */,
+				B65A635D2252B3A000A95474 /* memory_pressure.c */,
 				925383D01BD03B4A00F745DB /* Makefile */,
-				C9571C3B1C18AD4F00A67EE3 /* MallocBench */,
-				C9571C661C18AD6A00A67EE3 /* MallocBench.cpp */,
 				B6536A6320475BA4005FBE22 /* basic_malloc_free_perf.c */,
 				B675F74520213D0A00B5038B /* nano_tests.c */,
 				B6C1C9C720D9B70F002CCC0B /* nano_trace_replay.c */,
 				B6536A62204754B6005FBE22 /* perf_contended_malloc_free.c */,
 				B670DABD2072D0BB00139A1D /* perf_realloc.c */,
-				088C4D761D1AEFC5005C6B36 /* radix_tree_test.m */,
-				0D468DCE1C7BEE74006FACF5 /* stack_logging_test.c */,
+				B68C985C2180BEB5003DAF36 /* region_cookie_test.c */,
 				925383D11BD03B4A00F745DB /* stress_test.c */,
 			);
 			path = tests;
@@ -692,49 +657,10 @@
 			children = (
 				C9571C391C18AA1D00A67EE3 /* stack_logging.h */,
 				C0352EC61C3F3C3600DB5126 /* malloc_private.h */,
+				08315121215ED9C700D97E04 /* malloc_implementation.h */,
+				2BED1E6A203E2F7700CB8C15 /* make_tapi_happy.h */,
 			);
 			path = private;
-			sourceTree = "<group>";
-		};
-		C9571C3B1C18AD4F00A67EE3 /* MallocBench */ = {
-			isa = PBXGroup;
-			children = (
-				C9571C3C1C18AD5F00A67EE3 /* balloon.cpp */,
-				C9571C3D1C18AD5F00A67EE3 /* balloon.h */,
-				C9571C3E1C18AD5F00A67EE3 /* Benchmark.cpp */,
-				C9571C3F1C18AD5F00A67EE3 /* Benchmark.h */,
-				C9571C401C18AD5F00A67EE3 /* big.cpp */,
-				C9571C411C18AD5F00A67EE3 /* big.h */,
-				C9571C421C18AD5F00A67EE3 /* churn.cpp */,
-				C9571C431C18AD5F00A67EE3 /* churn.h */,
-				C9571C441C18AD5F00A67EE3 /* CommandLine.cpp */,
-				C9571C451C18AD5F00A67EE3 /* CommandLine.h */,
-				C9571C461C18AD5F00A67EE3 /* CPUCount.cpp */,
-				C9571C471C18AD5F00A67EE3 /* CPUCount.h */,
-				C9571C4C1C18AD5F00A67EE3 /* fragment.cpp */,
-				C9571C4D1C18AD5F00A67EE3 /* fragment.h */,
-				C9571C4E1C18AD5F00A67EE3 /* Interpreter.cpp */,
-				C9571C4F1C18AD5F00A67EE3 /* Interpreter.h */,
-				C9571C501C18AD5F00A67EE3 /* list.cpp */,
-				C9571C511C18AD5F00A67EE3 /* list.h */,
-				C9571C521C18AD5F00A67EE3 /* mbmalloc.cpp */,
-				C9571C531C18AD5F00A67EE3 /* mbmalloc.h */,
-				C9571C541C18AD5F00A67EE3 /* medium.cpp */,
-				C9571C551C18AD5F00A67EE3 /* medium.h */,
-				C9571C561C18AD5F00A67EE3 /* memalign.cpp */,
-				C9571C571C18AD5F00A67EE3 /* memalign.h */,
-				C9571C581C18AD5F00A67EE3 /* message.cpp */,
-				C9571C591C18AD5F00A67EE3 /* message.h */,
-				C9571C5A1C18AD5F00A67EE3 /* realloc.cpp */,
-				C9571C5B1C18AD5F00A67EE3 /* realloc.h */,
-				C9571C5E1C18AD5F00A67EE3 /* stress_aligned.cpp */,
-				C9571C5F1C18AD5F00A67EE3 /* stress_aligned.h */,
-				C9571C601C18AD5F00A67EE3 /* stress.cpp */,
-				C9571C611C18AD5F00A67EE3 /* stress.h */,
-				C9571C641C18AD5F00A67EE3 /* tree.cpp */,
-				C9571C651C18AD5F00A67EE3 /* tree.h */,
-			);
-			path = MallocBench;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -746,15 +672,16 @@
 			files = (
 				C957428A1BF3FD290027269A /* base.h in Headers */,
 				C0352EC71C3F3C4400DB5126 /* malloc_private.h in Headers */,
-				0D468DD01C7BEF71006FACF5 /* stack_logging_internal.h in Headers */,
 				C95742731BF2C2880027269A /* internal.h in Headers */,
 				B6CA644E1FCE2C1900DEBA12 /* nanov2_zone.h in Headers */,
 				C99E320C1D6F7366005655A8 /* magazine_rack.h in Headers */,
 				C95742721BF2C2880027269A /* bitarray.h in Headers */,
 				C932D2691D6B8D840063B19E /* vm.h in Headers */,
+				08315123215EE9A100D97E04 /* stack_logging.h in Headers */,
 				B6CA64521FCF1AD200DEBA12 /* nano_zone_common.h in Headers */,
 				C938BBD31C74F7A400522BBD /* trace.h in Headers */,
 				C95742A81BF6842F0027269A /* frozen_malloc.h in Headers */,
+				08315122215ED9CF00D97E04 /* malloc_implementation.h in Headers */,
 				C957428D1BF411330027269A /* thresholds.h in Headers */,
 				C95742741BF2C2880027269A /* locking.h in Headers */,
 				C95742931BF41C970027269A /* magazine_inline.h in Headers */,
@@ -765,7 +692,6 @@
 				C957427C1BF2C8DE0027269A /* debug.h in Headers */,
 				2B67B5682040B3AF0003E78F /* _malloc.h in Headers */,
 				C95742961BF41E480027269A /* magazine_malloc.h in Headers */,
-				C9571C3A1C18AA1D00A67EE3 /* stack_logging.h in Headers */,
 				3FE91FFA16A90BEF00D1238A /* malloc.h in Headers */,
 				C95742871BF3F9550027269A /* magazine_zone.h in Headers */,
 				C95742771BF2C2880027269A /* legacy_malloc.h in Headers */,
@@ -832,22 +758,6 @@
 /* End PBXLegacyTarget section */
 
 /* Begin PBXNativeTarget section */
-		08C28B3F1D501D2C000AE997 /* radix-tree */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 08C28B441D501D2C000AE997 /* Build configuration list for PBXNativeTarget "radix-tree" */;
-			buildPhases = (
-				08C28B3C1D501D2C000AE997 /* Sources */,
-				08C28B3D1D501D2C000AE997 /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = "radix-tree";
-			productName = "radix-tree";
-			productReference = 08C28B401D501D2C000AE997 /* radix-tree */;
-			productType = "com.apple.product-type.tool";
-		};
 		3FE91FE716A90AEC00D1238A /* libsystem_malloc */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3FE91FEA16A90AEC00D1238A /* Build configuration list for PBXNativeTarget "libsystem_malloc" */;
@@ -976,13 +886,10 @@
 		3FFC1BE516A908F800027192 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
+				DefaultBuildSystemTypeForWorkspace = Latest;
 				LastSwiftUpdateCheck = 0700;
 				LastUpgradeCheck = 0900;
 				TargetAttributes = {
-					08C28B3F1D501D2C000AE997 = {
-						CreatedOnToolsVersion = 8.0;
-						ProvisioningStyle = Automatic;
-					};
 					45039161198FFF73004EE2A3 = {
 						CreatedOnToolsVersion = 6.0;
 					};
@@ -1011,6 +918,7 @@
 			projectRoot = "";
 			targets = (
 				3FE9201116A9111000D1238A /* libmalloc */,
+				E4B7FCB222000DAD0010A840 /* libmalloc_driverkit */,
 				45039161198FFF73004EE2A3 /* libmalloc_test */,
 				3FE91FE716A90AEC00D1238A /* libsystem_malloc */,
 				B6910F65202B630D00FF2EB0 /* libmalloc_mp */,
@@ -1019,7 +927,6 @@
 				C0CE452F1C52C90500C24048 /* libmalloc_static */,
 				B6D2ED492007D76F007AF994 /* libmalloc_replay */,
 				456E51C8197DF0D600A7E488 /* libmalloc_stress_test */,
-				08C28B3F1D501D2C000AE997 /* radix-tree */,
 				925383D41BD03C0500F745DB /* darwintests */,
 				B60A57932009307E006215CB /* executables */,
 			);
@@ -1055,7 +962,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 1;
 			shellPath = /bin/sh;
-			shellScript = ". \"${SCRIPT_INPUT_FILE_0}\"";
+			shellScript = ". \"${SCRIPT_INPUT_FILE_0}\"\n";
 		};
 		B629CF2A202BB226007719B9 /* Symlink normal variant */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -1105,23 +1012,28 @@
 			shellPath = /bin/bash;
 			shellScript = ". \"$PROJECT_DIR\"/xcodescripts/install-codes.sh";
 		};
+		E4B7FCBA22000DAD0010A840 /* Sanitise Headers (rdar://problem/10241868) */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 8;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/xcodescripts/sanitise_headers.sh",
+			);
+			name = "Sanitise Headers (rdar://problem/10241868)";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+			shellPath = /bin/sh;
+			shellScript = ". \"${SCRIPT_INPUT_FILE_0}\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		08C28B3C1D501D2C000AE997 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				084F5E851D502102006CD296 /* radix_tree_debug.c in Sources */,
-				08FEED021D501F6B00BE8A69 /* radix_tree_main.m in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		3FE91FE416A90AEC00D1238A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				088C4D771D1AF049005C6B36 /* radix_tree.c in Sources */,
 				3FE91FED16A90B9200D1238A /* bitarray.c in Sources */,
 				B66C71DA2034BFAE0047E265 /* malloc_common.c in Sources */,
 				C95742A01BF681B00027269A /* purgeable_malloc.c in Sources */,
@@ -1132,14 +1044,14 @@
 				C95742AB1BF685CB0027269A /* legacy_malloc.c in Sources */,
 				C932D2681D6B8D840063B19E /* vm.c in Sources */,
 				3FE91FF116A90B9200D1238A /* magmallocProvider.d in Sources */,
-				0D468DCF1C7BEF51006FACF5 /* magazine_lite.c in Sources */,
+				B6AFD93C214C6198007983DA /* msl_lite_support.c in Sources */,
 				B68B7FA51FCDD9A500BAD1AA /* nanov2_malloc.c in Sources */,
 				B6D5C7F1202E26F80035E376 /* resolver.c in Sources */,
 				B68B7F9F1FCDCBC600BAD1AA /* nano_malloc_common.c in Sources */,
 				3FE91FF216A90B9200D1238A /* malloc.c in Sources */,
+				C94B447821925CA50005EA6F /* magazine_medium.c in Sources */,
 				C95742A61BF6842F0027269A /* frozen_malloc.c in Sources */,
 				3FE91FF416A90B9200D1238A /* nano_malloc.c in Sources */,
-				3FE91FF616A90B9200D1238A /* stack_logging_disk.c in Sources */,
 				C95742901BF419DF0027269A /* magazine_tiny.c in Sources */,
 				B65FBE2C2087AA2F00E21F59 /* malloc_printf.c in Sources */,
 			);
@@ -1149,6 +1061,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C94B447B21925CA70005EA6F /* magazine_medium.c in Sources */,
 				B66C71DB2034BFD30047E265 /* malloc_common.c in Sources */,
 				3FE91FFF16A9109E00D1238A /* bitarray.c in Sources */,
 				C95742A11BF681B00027269A /* purgeable_malloc.c in Sources */,
@@ -1162,7 +1075,6 @@
 				3FE9200316A9109E00D1238A /* malloc.c in Sources */,
 				C95742A71BF6842F0027269A /* frozen_malloc.c in Sources */,
 				3FE9200416A9109E00D1238A /* nano_malloc.c in Sources */,
-				3FE9200616A9109E00D1238A /* stack_logging_disk.c in Sources */,
 				C95742911BF419DF0027269A /* magazine_tiny.c in Sources */,
 				B6D5C7F4202E26F90035E376 /* resolver.c in Sources */,
 			);
@@ -1180,12 +1092,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B629CF2D202BB337007719B9 /* radix_tree.c in Sources */,
 				B629CF2E202BB337007719B9 /* bitarray.c in Sources */,
 				B629CF2F202BB337007719B9 /* purgeable_malloc.c in Sources */,
 				B6D5C7F3202E26F90035E376 /* resolver.c in Sources */,
 				B629CF30202BB337007719B9 /* magazine_large.c in Sources */,
 				B629CF31202BB337007719B9 /* magazine_malloc.c in Sources */,
+				C94B447A21925CA60005EA6F /* magazine_medium.c in Sources */,
 				B629CF32202BB337007719B9 /* empty.s in Sources */,
 				B629CF33202BB337007719B9 /* magazine_small.c in Sources */,
 				B629CF34202BB337007719B9 /* legacy_malloc.c in Sources */,
@@ -1194,7 +1106,6 @@
 				B629CF37202BB337007719B9 /* frozen_malloc.c in Sources */,
 				B629CF38202BB337007719B9 /* nanov2_malloc.c in Sources */,
 				B629CF39202BB337007719B9 /* nano_malloc.c in Sources */,
-				B629CF3A202BB337007719B9 /* stack_logging_disk.c in Sources */,
 				B629CF3B202BB337007719B9 /* magazine_tiny.c in Sources */,
 				B629CF3C202BB337007719B9 /* nano_malloc_common.c in Sources */,
 			);
@@ -1204,12 +1115,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B6910F67202B630D00FF2EB0 /* radix_tree.c in Sources */,
 				B6910F68202B630D00FF2EB0 /* bitarray.c in Sources */,
 				B6910F69202B630D00FF2EB0 /* purgeable_malloc.c in Sources */,
 				B6D5C7F2202E26F80035E376 /* resolver.c in Sources */,
 				B6910F6A202B630D00FF2EB0 /* magazine_large.c in Sources */,
 				B6910F6B202B630D00FF2EB0 /* magazine_malloc.c in Sources */,
+				C94B447921925CA60005EA6F /* magazine_medium.c in Sources */,
 				B6910F6C202B630D00FF2EB0 /* empty.s in Sources */,
 				B6910F6D202B630D00FF2EB0 /* magazine_small.c in Sources */,
 				B6910F6E202B630D00FF2EB0 /* legacy_malloc.c in Sources */,
@@ -1218,7 +1129,6 @@
 				B6910F71202B630D00FF2EB0 /* frozen_malloc.c in Sources */,
 				B629CF28202BA149007719B9 /* nanov2_malloc.c in Sources */,
 				B6910F73202B630D00FF2EB0 /* nano_malloc.c in Sources */,
-				B6910F74202B630D00FF2EB0 /* stack_logging_disk.c in Sources */,
 				B6910F75202B630D00FF2EB0 /* magazine_tiny.c in Sources */,
 				B6910F76202B630D00FF2EB0 /* nano_malloc_common.c in Sources */,
 			);
@@ -1236,8 +1146,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				088C4D841D1AF16F005C6B36 /* radix_tree.c in Sources */,
 				C0CE45311C52C90500C24048 /* bitarray.c in Sources */,
+				C94B447C21925CA80005EA6F /* magazine_medium.c in Sources */,
 				C0CE45321C52C90500C24048 /* purgeable_malloc.c in Sources */,
 				B6D5C7F5202E26FA0035E376 /* resolver.c in Sources */,
 				C0CE45331C52C90500C24048 /* magazine_large.c in Sources */,
@@ -1251,7 +1161,6 @@
 				B68B7FA71FCDD9B200BAD1AA /* nanov2_malloc.c in Sources */,
 				B66C71DC2034BFD40047E265 /* malloc_common.c in Sources */,
 				C0CE453A1C52C90500C24048 /* nano_malloc.c in Sources */,
-				C0CE453C1C52C90500C24048 /* stack_logging_disk.c in Sources */,
 				C0CE453D1C52C90500C24048 /* magazine_tiny.c in Sources */,
 				B68B7FA11FCDCBE800BAD1AA /* nano_malloc_common.c in Sources */,
 			);
@@ -1300,23 +1209,14 @@
 			target = C0CE452F1C52C90500C24048 /* libmalloc_static */;
 			targetProxy = C0CE454F1C52CCBD00C24048 /* PBXContainerItemProxy */;
 		};
+		E4B7FCB522000DAD0010A840 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3FE91FE716A90AEC00D1238A /* libsystem_malloc */;
+			targetProxy = E4B7FCB622000DAD0010A840 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		08C28B451D501D2C000AE997 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				PRODUCT_NAME = "$(TARGET_NAME)";
-			};
-			name = Debug;
-		};
-		08C28B461D501D2C000AE997 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				PRODUCT_NAME = "$(TARGET_NAME)";
-			};
-			name = Release;
-		};
 		3FE91FEB16A90AEC00D1238A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = B629CF29202BA3C2007719B9 /* libmalloc_resolver.xcconfig */;
@@ -1594,18 +1494,25 @@
 			};
 			name = Release;
 		};
+		E4B7FCBC22000DAD0010A840 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		E4B7FCBD22000DAD0010A840 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		08C28B441D501D2C000AE997 /* Build configuration list for PBXNativeTarget "radix-tree" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				08C28B451D501D2C000AE997 /* Debug */,
-				08C28B461D501D2C000AE997 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		3FE91FEA16A90AEC00D1238A /* Build configuration list for PBXNativeTarget "libsystem_malloc" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -1710,6 +1617,15 @@
 			buildConfigurations = (
 				C0CE454A1C52C90500C24048 /* Debug */,
 				C0CE454B1C52C90500C24048 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E4B7FCBB22000DAD0010A840 /* Build configuration list for PBXAggregateTarget "libmalloc_driverkit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E4B7FCBC22000DAD0010A840 /* Debug */,
+				E4B7FCBD22000DAD0010A840 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

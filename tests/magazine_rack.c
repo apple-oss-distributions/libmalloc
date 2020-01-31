@@ -9,6 +9,8 @@
 #include <darwintest.h>
 #include "magazine_testing.h"
 
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+
 T_DECL(basic_magazine_init, "allocate magazine counts")
 {
 	struct rack_s rack;

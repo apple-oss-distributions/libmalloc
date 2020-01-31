@@ -12,36 +12,17 @@ TRACE_FILES := \
 #   exclude_this_file.mtrace
 EXCLUDED_TRACE_FILES :=
 
-OTHER_TEST_TARGETS = \
-	$(addprefix nano-trace-replay_, $(basename $(filter-out $(EXCLUDED_TRACE_FILES), $(TRACE_FILES))))
+CUSTOM_TARGETS = \
+	MALLOC_BENCH
 
-BATS_PLISTS = \
+OTHER_TEST_TARGETS = \
+	$(addprefix nano-trace-replay_, $(basename $(filter-out $(EXCLUDED_TRACE_FILES), $(TRACE_FILES)))) 
+
+MALLOCBENCHTEST_DIR = $(SRCROOT)/MallocBenchTest
+BATS_PLISTS_EXTRACT = \
 	$(patsubst %,$(SYMROOT)/%.plist,$(OTHER_TEST_TARGETS))
 
-CUSTOM_TARGETS = \
-	single-churn \
-	single-list_allocate \
-	single-tree_allocate \
-	single-tree_churn \
-	single-fragment \
-	single-fragment_iterate \
-	single-message_one \
-	single-message_many \
-	parallel-churn \
-	parallel-list_allocate \
-	parallel-tree_allocate \
-	parallel-tree_churn \
-	parallel-fragment \
-	parallel-fragment_iterate
-
-#	single-medium \
-#	single-big \
-#	parallel-medium \
-#	parallel-big
-
-MALLOCBENCH_SOURCE := $(wildcard MallocBench/*.cpp)
 EXCLUDED_SOURCES := \
-	MallocBench.cpp \
 	nano_trace_replay.c
 CXX := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find clang++)
 
@@ -51,44 +32,12 @@ OTHER_CFLAGS += \
 	-DOS_UNFAIR_LOCK_INLINE=1 \
 	-lCrashReporterClient \
 	-I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders \
-	-I$(SRCROOT)/../include/malloc \
+	-I$(SRCROOT)/../private \
+	-I$(SRCROOT)/../include \
 	$(WARNING_CFLAGS)
 
-$(OBJROOT)/MallocBench/%.o: MallocBench/%.cpp
-	@mkdir -p $(OBJROOT)/MallocBench
-	$(CXX) $(CFLAGS) -I$(SRCROOT)/MallocBench -std=gnu++11 -stdlib=libc++ -c -o $@ $<
-
-single-%: $(addprefix $(OBJROOT)/, $(MALLOCBENCH_SOURCE:.cpp=.o))
-	$(CXX) -c -o $(OBJROOT)/MallocBench-$@.o \
-		-I$(SRCROOT)/MallocBench \
-		$(CFLAGS) \
-		-DBENCHMARK_NAME=\"$*\" \
-		-DPARALLEL=false \
-		$(SRCROOT)/MallocBench.cpp
-	$(CXX) -o $(SYMROOT)/$@ \
-		$(CFLAGS) \
-		$^ \
-		$(OBJROOT)/MallocBench-$@.o
-
-install-single-%: $(CUSTOM_TARGETS)
-	@mkdir -p $(INSTALLDIR)
-	cp $(SYMROOT)/$(patsubst install-%,%,$@) $(INSTALLDIR)/$(patsubst install-%,%,$@)
-
-parallel-%: $(addprefix $(OBJROOT)/, $(MALLOCBENCH_SOURCE:.cpp=.o))
-	$(CXX) -c -o $(OBJROOT)/MallocBench-$@.o \
-		-I$(SRCROOT)/MallocBench \
-		$(CFLAGS) \
-		-DBENCHMARK_NAME=\"$*\" \
-		-DPARALLEL=true \
-		$(SRCROOT)/MallocBench.cpp
-	$(CXX) -o $(SYMROOT)/$@ \
-		$(CFLAGS) \
-		$^ \
-		$(OBJROOT)/MallocBench-$@.o
-
-install-parallel-%: $(CUSTOM_TARGETS)
-	@mkdir -p $(INSTALLDIR)
-	cp $(SYMROOT)/$(patsubst install-%,%,$@) $(INSTALLDIR)/$(patsubst install-%,%,$@)
+PRIVATE_FRAMEWORKS = $(SDKROOT)/System/Library/PrivateFrameworks
+PERFDATA_FRAMEWORK = perfdata
 
 nano-trace-replay_%: $(SRCROOT)/nano_trace_replay.c
 	$(CC) \
@@ -98,7 +47,18 @@ nano-trace-replay_%: $(SRCROOT)/nano_trace_replay.c
 		-o $@ \
 		$(SRCROOT)/nano_trace_replay.c
 
-$(BATS_PLISTS): %.plist : %
+# For now, we only build and run MallocBench on iOS. macOS requires
+# us to adopt installAPI.
+LOWER_SDKROOT  = $(shell echo $(SDKROOT) | tr '[:upper:]' '[:lower:]')
+ifneq (, $(findstring iphoneos,$(LOWER_SDKROOT)))
+include MallocBenchTest/Makefile.malloc-bench
+BATS_PLISTS = $(BATS_PLISTS_EXTRACT) $(MALLOCBENCHTEST_DIR)/MallocBench.plist
+else
+include MallocBenchTest/Makefile.dummy
+BATS_PLISTS = $(BATS_PLISTS_EXTRACT)
+endif
+
+$(BATS_PLISTS_EXTRACT): %.plist : %
 	$(EXTRACTMETA) extract -i /$(INSTALLPATH)/$(notdir $<) -b $(SYMROOT)/$(notdir $<) -o $@
 	@plutil -convert binary1 $@
 
@@ -114,8 +74,6 @@ EXCLUDED_SOURCES += tsan.c
 endif
 
 madvise: OTHER_CFLAGS += -I../src
-stack_logging_test: OTHER_CFLAGS += -I../private
-radix_tree_test: OTHER_CFLAGS += -I../src -framework Foundation
 
 .DEFAULT_GOAL := all
 

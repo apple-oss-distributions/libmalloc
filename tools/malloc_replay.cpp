@@ -91,6 +91,9 @@ typedef uint8_t replay_config_t;
 //
 malloc_zone_t* s_zone = NULL;
 
+// The magazine number to use for non-replayed allocations.
+#define NON_REPLAY_MAGAZINE 0
+
 static void
 configure_ktrace_session(ktrace_session_t s)
 {
@@ -477,6 +480,10 @@ run_event(const struct compressed_operation* currentOperation,
 		break;
     };
 
+	if (s_funcMagSetThreadIndex){
+		s_funcMagSetThreadIndex(NON_REPLAY_MAGAZINE);
+	}
+
 	if (config & (CONFIG_REC_COUNTERS | CONFIG_REC_STATS)) {
 		uint64_t diff = postICount - preICount;
 		uint16_t instrCount = diff <= UINT16_MAX ? diff : UINT16_MAX;
@@ -571,11 +578,8 @@ vm_range_recorder(task_t task, void* context, unsigned type, vm_range_t *ranges,
 					if (disposition & (VM_PAGE_QUERY_PAGE_COPIED|VM_PAGE_QUERY_PAGE_DIRTY)) {
 						magazine.pages_dirty++;
 					}
-
-					magazine.pages_resident++;
-				} else if (disposition & VM_PAGE_QUERY_PAGE_PAGED_OUT){
+				} else if (disposition & VM_PAGE_QUERY_PAGE_PAGED_OUT) {
 					magazine.pages_dirty++;
-					magazine.pages_resident++;
 				}
 			}
 		}
@@ -681,7 +685,13 @@ run_malloc_replay(const char* fileName, pdwriter_t perfDataWriter, replay_config
 	s_addressMap.clear();
 	ktrace_session_destroy(s);
 
-    //
+	return true;
+}
+
+static void
+report_results(pdwriter_t perfDataWriter, replay_config_t config)
+{
+	//
     //If passed a writer, output performance data.
     //
     if (perfDataWriter) {
@@ -766,7 +776,7 @@ run_malloc_replay(const char* fileName, pdwriter_t perfDataWriter, replay_config
 		//
 		pdwriter_new_value(perfDataWriter, _DefaultFragMetricName, PDUNIT_CUSTOM(FragmentedPercent), defaultFrag);
 		pdwriter_record_variable(perfDataWriter, kPCFailureThresholdPctVar, 10);
-	} else if (config & CONFIG_REC_STATS){
+	} else if (config & CONFIG_REC_STATS) {
 		printf("\n\n\n");
 		printf("Call       Cycles (mean)\n");
 		printf("=====================\n");
@@ -830,9 +840,7 @@ run_malloc_replay(const char* fileName, pdwriter_t perfDataWriter, replay_config
 			pdwriter_end_extension(perfDataWriter, jsonW);
 		}
 	}
-	return true;
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -922,6 +930,7 @@ main(int argc, char** argv)
 	}
 
 	timespec beginTime = {0};
+	timespec endTime = {0};
 
     pdwriter_t writer = NULL;
     if (outputPerfData) {
@@ -959,29 +968,34 @@ main(int argc, char** argv)
 
 		if (!s_funcMagSetThreadIndex) {
 			printf("\n****Couldn't load mag_set_thread_index, replay won't honor core****\n\n");
+		} else {
+			s_funcMagSetThreadIndex(NON_REPLAY_MAGAZINE);
 		}
 
 		clock_gettime(CLOCK_MONOTONIC_RAW, &beginTime);
 
-
 		if (!run_malloc_replay(inputMTrace, writer, config)) {
 			return -1;
 		}
+
+		clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+
+		report_results(writer, config);
 	} else if (config & CONFIG_CONVERT_FILE) {
 		clock_gettime(CLOCK_MONOTONIC_RAW, &beginTime);
 		if (!run_ktrace(inputKtrace, outputMTrace)) {
 			printf("\n****Couldn't record mtrace file.\n");
 		}
+		clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
 	} else if (outputMTrace) {
 		clock_gettime(CLOCK_MONOTONIC_RAW, &beginTime);
 		if (!run_ktrace(NULL, outputMTrace)) {
 			printf("\n****Couldn't record mtrace file.\n");
 		}
+		clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
 	}
 
 	if (beginTime.tv_sec) {
-		timespec endTime;
-		clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
 		printf("\n\nRuntime: %ld ms\n", ((endTime.tv_sec - beginTime.tv_sec) * 1000) + (endTime.tv_nsec - beginTime.tv_nsec)/1000000);
 	}
 

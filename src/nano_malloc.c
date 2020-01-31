@@ -1523,9 +1523,9 @@ nano_good_size(nanozone_t *nanozone, size_t size)
 }
 
 // TODO sanity checks
-unsigned nanozone_check_counter = 0;
-unsigned nanozone_check_start = 0;
-unsigned nanozone_check_modulo = 1;
+static unsigned nanozone_check_counter = 0;
+static unsigned nanozone_check_start = 0;
+static unsigned nanozone_check_modulo = 1;
 
 static boolean_t
 nano_check_all(nanozone_t *nanozone, const char *function)

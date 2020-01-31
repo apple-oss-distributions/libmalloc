@@ -1,3 +1,8 @@
+__malloc_lock
+__dlopen
+__dlsym
+_default_zone_introspect
+_malloc_msl_lite_hooks
 _max_magazines
 _malloc_entropy
 _first_block_offset_by_size_class
