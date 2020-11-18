@@ -54,7 +54,8 @@ rack_init(rack_t *rack, rack_type_t type, uint32_t num_magazines, uint32_t debug
 	if (num_magazines > 0) {
 		// num_magazines + 1, the [-1] index will become the depot magazine
 		size_t magsize = round_page_quanta(sizeof(magazine_t) * (num_magazines + 1));
-		magazine_t *magazines = mvm_allocate_pages(magsize, 0, MALLOC_ADD_GUARD_PAGES, VM_MEMORY_MALLOC);
+		magazine_t *magazines = mvm_allocate_pages(magsize, 0,
+				MALLOC_ADD_GUARD_PAGE_FLAGS|DISABLE_ASLR, VM_MEMORY_MALLOC);
 		if (!magazines) {
 			MALLOC_REPORT_FATAL_ERROR(0, "unable to allocate magazine array");
 		}
@@ -91,7 +92,7 @@ rack_destroy_regions(rack_t *rack, size_t region_size)
 		if ((rack->region_generation->hashed_regions[i] != HASHRING_OPEN_ENTRY) &&
 			(rack->region_generation->hashed_regions[i] != HASHRING_REGION_DEALLOCATED))
 		{
-			mvm_deallocate_pages(rack->region_generation->hashed_regions[i], region_size, 0);
+			mvm_deallocate_pages(rack->region_generation->hashed_regions[i], region_size, MALLOC_FIX_GUARD_PAGE_FLAGS(rack->debug_flags));
 			rack->region_generation->hashed_regions[i] = HASHRING_REGION_DEALLOCATED;
 		}
 	}
@@ -108,7 +109,7 @@ rack_destroy(rack_t *rack)
 
 	if (rack->num_magazines > 0) {
 		size_t size = round_page_quanta(sizeof(magazine_t) * (rack->num_magazines + 1));
-		mvm_deallocate_pages(&rack->magazines[-1], size, MALLOC_ADD_GUARD_PAGES);
+		mvm_deallocate_pages(&rack->magazines[-1], size, MALLOC_ADD_GUARD_PAGE_FLAGS);
 		rack->magazines = NULL;
 	}
 }
@@ -142,10 +143,11 @@ rack_region_insert(rack_t *rack, region_t region)
 		rack->region_generation->nextgen->num_regions_allocated = new_size;
 		rack->region_generation->nextgen->num_regions_allocated_shift = new_shift;
 
-		// Throw the switch to atomically advance to the next generation.
-		rack->region_generation = rack->region_generation->nextgen;
 		// Ensure everyone sees the advance.
 		OSMemoryBarrier();
+
+		// Throw the switch to atomically advance to the next generation.
+		rack->region_generation = rack->region_generation->nextgen;
 	}
 
 	// Insert the new region into the hash ring, and update malloc statistics

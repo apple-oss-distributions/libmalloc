@@ -354,7 +354,7 @@ create_purgeable_zone(size_t initial_size, malloc_zone_t *malloc_default_zone, u
 	uint64_t hw_memsize = 0;
 
 	/* get memory for the zone. */
-	szone = mvm_allocate_pages(SZONE_PAGED_SIZE, 0, 0, VM_MEMORY_MALLOC);
+	szone = mvm_allocate_pages(SZONE_PAGED_SIZE, 0, DISABLE_ASLR, VM_MEMORY_MALLOC);
 	if (!szone) {
 		return NULL;
 	}
@@ -377,15 +377,17 @@ create_purgeable_zone(size_t initial_size, malloc_zone_t *malloc_default_zone, u
 	rack_init(&szone->small_rack, RACK_TYPE_SMALL, 0, debug_flags | MALLOC_PURGEABLE);
 
 #if CONFIG_LARGE_CACHE
-	// madvise(..., MADV_REUSABLE) death-row arrivals above this threshold [~0.1%]
-	szone->large_entry_cache_reserve_limit = (size_t)(hw_memsize >> 10);
+	if (large_cache_enabled) {
+		// madvise(..., MADV_REUSABLE) death-row arrivals above this threshold [~0.1%]
+		szone->large_entry_cache_reserve_limit = (size_t)(hw_memsize >> 10);
 
-	/* <rdar://problem/6610904> Reset protection when returning a previous large allocation? */
-	int32_t libSystemVersion = NSVersionOfLinkTimeLibrary("System");
-	if ((-1 != libSystemVersion) && ((libSystemVersion >> 16) < 112) /* CFSystemVersionSnowLeopard */) {
-		szone->large_legacy_reset_mprotect = TRUE;
-	} else {
-		szone->large_legacy_reset_mprotect = FALSE;
+		/* <rdar://problem/6610904> Reset protection when returning a previous large allocation? */
+		int32_t libSystemVersion = NSVersionOfLinkTimeLibrary("System");
+		if ((-1 != libSystemVersion) && ((libSystemVersion >> 16) < 112) /* CFSystemVersionSnowLeopard */) {
+			szone->large_legacy_reset_mprotect = TRUE;
+		} else {
+			szone->large_legacy_reset_mprotect = FALSE;
+		}
 	}
 #endif
 
@@ -412,11 +414,13 @@ create_purgeable_zone(size_t initial_size, malloc_zone_t *malloc_default_zone, u
 	szone->debug_flags = debug_flags | MALLOC_PURGEABLE;
 
 	/* Purgeable zone does not support MALLOC_ADD_GUARD_PAGES. */
-	if (szone->debug_flags & MALLOC_ADD_GUARD_PAGES) {
-		malloc_report(ASL_LEVEL_INFO, "purgeable zone does not support guard pages\n");
-		szone->debug_flags &= ~MALLOC_ADD_GUARD_PAGES;
+	if (szone->debug_flags & MALLOC_ALL_GUARD_PAGE_FLAGS) {
+		if (!(szone->debug_flags & MALLOC_GUARD_ALL)) {
+			// Don't report when MallocGuardEdges == "all".
+			malloc_report(ASL_LEVEL_INFO, "purgeable zone does not support guard pages\n");
+		}
+		szone->debug_flags &= ~MALLOC_ALL_GUARD_PAGE_FLAGS;
 	}
-
 	_malloc_lock_init(&szone->large_szone_lock);
 
 	szone->helper_zone = (struct szone_s *)malloc_default_zone;

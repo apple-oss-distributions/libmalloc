@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,34 +21,18 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#ifndef _PGUARD_MALLOC_H_
+#define _PGUARD_MALLOC_H_
 
-#ifndef __VM_H
-#define __VM_H
-
-static inline bool
-mvm_aslr_enabled(void)
-{
-	return _dyld_get_image_slide((const struct mach_header *)_NSGetMachExecuteHeader()) != 0;
-}
+#include "base.h"
+#include "malloc/malloc.h"
 
 MALLOC_NOEXPORT
-void
-mvm_aslr_init(void);
+boolean_t
+pguard_enabled(void);
 
 MALLOC_NOEXPORT
-void *
-mvm_allocate_pages(size_t size, unsigned char align, uint32_t debug_flags, int vm_page_label);
+malloc_zone_t *
+pguard_create_zone(malloc_zone_t *wrapped_zone, unsigned debug_flags);
 
-MALLOC_NOEXPORT
-void
-mvm_deallocate_pages(void *addr, size_t size, unsigned debug_flags);
-
-MALLOC_NOEXPORT
-int
-mvm_madvise_free(void *szone, void *r, uintptr_t pgLo, uintptr_t pgHi, uintptr_t *last, boolean_t scribble);
-
-MALLOC_NOEXPORT
-void
-mvm_protect(void *address, size_t size, unsigned protection, unsigned debug_flags);
-
-#endif // __VM_H
+#endif // _PGUARD_MALLOC_H_
