@@ -67,6 +67,7 @@
 #endif
 #include <os/tsd.h>
 #include <paths.h>
+#include <pthread/pthread.h>  // _pthread_threadid_self_np_direct()
 #include <pthread/private.h>  // _pthread_threadid_self_np_direct()
 #include <pthread/tsd_private.h>  // TSD keys
 #include <signal.h>
@@ -102,9 +103,9 @@
 #include "magazine_malloc.h"
 #include "malloc_common.h"
 #include "nano_malloc_common.h"
-#include "nano_malloc.h"
 #include "nanov2_malloc.h"
-#include "pguard_malloc.h"
+#include "pgm_malloc.h"
+#include "quarantine_malloc.h"
 #include "purgeable_malloc.h"
 #include "malloc_private.h"
 #include "thresholds.h"
@@ -116,6 +117,7 @@
 #include "nanov2_zone.h"
 #include "magazine_inline.h"
 #include "stack_logging.h"
+#include "stack_trace.h"
 #include "malloc_implementation.h"
 
 MALLOC_NOEXPORT
@@ -129,6 +131,9 @@ extern bool malloc_space_efficient_enabled;
 
 MALLOC_NOEXPORT
 extern bool malloc_medium_space_efficient_enabled;
+
+MALLOC_NOEXPORT
+extern bool malloc_quarantine_enabled;
 
 MALLOC_NOEXPORT MALLOC_NOINLINE
 void
@@ -145,6 +150,18 @@ malloc_traced(void)
 	return malloc_tracing_enabled;
 }
 
+static inline uint32_t
+_malloc_cpu_number(void)
+{
+#if TARGET_OS_SIMULATOR
+	size_t n;
+	pthread_cpu_number_np(&n);
+	return (uint32_t)n;
+#else
+	return _os_cpu_number();
+#endif
+}
+
 /*
   * Copies the malloc library's _malloc_msl_lite_hooks_t structure to a given
   * location. Size is passed to allow the structure to  grow. Since this is
@@ -158,11 +175,11 @@ void set_msl_lite_hooks(set_msl_lite_hooks_callout_t callout);
 
 
 // pthread reserves 5 TSD keys for libmalloc
-#define __TSD_MALLOC_PGUARD_SAMPLE_COUNTER __PTK_LIBMALLOC_KEY0
-#define __TSD_MALLOC_UNUSED1               __PTK_LIBMALLOC_KEY1
-#define __TSD_MALLOC_UNUSED2               __PTK_LIBMALLOC_KEY2
-#define __TSD_MALLOC_UNUSED3               __PTK_LIBMALLOC_KEY3
-#define __TSD_MALLOC_UNUSED4               __PTK_LIBMALLOC_KEY4
+#define __TSD_MALLOC_PROB_GUARD_SAMPLE_COUNTER __PTK_LIBMALLOC_KEY0
+#define __TSD_MALLOC_UNUSED1                   __PTK_LIBMALLOC_KEY1
+#define __TSD_MALLOC_UNUSED2                   __PTK_LIBMALLOC_KEY2
+#define __TSD_MALLOC_UNUSED3                   __PTK_LIBMALLOC_KEY3
+#define __TSD_MALLOC_UNUSED4                   __PTK_LIBMALLOC_KEY4
 
 
 #endif // __INTERNAL_H

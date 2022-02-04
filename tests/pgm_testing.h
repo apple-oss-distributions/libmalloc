@@ -1,39 +1,52 @@
 //
-//  pguard_testing.h
+//  pgm_testing.h
 //  libmalloc
 //
-//  Shared testing code for PGuard.
+//  Shared testing code for ProbGuard.
 //
 
-#ifndef _PGUARD_TESTING_H_
-#define _PGUARD_TESTING_H_
+#ifndef _PGM_TESTING_H_
+#define _PGM_TESTING_H_
 
 #pragma mark -
 #pragma mark Mocks
 
-#define PGUARD_MOCK_RANDOM
-static uint32_t rand_value;
+#define PGM_MOCK_RANDOM
 static uint32_t expected_upper_bound;
+static uint32_t rand_ret_value;
+static uint32_t rand_ret_values[10];
+static uint32_t rand_call_count;
+static bool rand_use_ret_values;
 static uint32_t
 rand_uniform(uint32_t upper_bound)
 {
 	T_QUIET; T_EXPECT_EQ(upper_bound, expected_upper_bound, "rand_uniform(upper_bound)");
-	return rand_value;
+	if (rand_use_ret_values) {
+		T_QUIET; T_ASSERT_LT(rand_call_count, 10, NULL);
+		rand_ret_value = rand_ret_values[rand_call_count];
+	}
+	rand_call_count++;
+	return rand_ret_value;
 }
 
-#define PGUARD_MOCK_CAPTURE_TRACE
-static stack_trace_t *expected_traces[10];
-static uint32_t expected_trace_index;
+#define PGM_MOCK_TRACE_COLLECT
+static uint8_t *expected_trace_buffers[3];
+static size_t expected_trace_sizes[3];
+static uint32_t capture_trace_call_count;
+static size_t collect_trace_ret_value;
 MALLOC_ALWAYS_INLINE
-static inline void
-capture_trace(stack_trace_t *trace)
+static inline size_t
+my_trace_collect(uint8_t *buffer, size_t size)
 {
-	assert(expected_trace_index < 10);
-	T_QUIET; T_EXPECT_EQ(trace, expected_traces[expected_trace_index], "capture_trace(trace)");
-	expected_trace_index++;
+	T_QUIET; T_ASSERT_LT(capture_trace_call_count, 3, NULL);
+	T_QUIET; T_EXPECT_EQ(buffer, expected_trace_buffers[capture_trace_call_count], "my_trace_collect(buffer)");
+	T_QUIET; T_EXPECT_EQ(size, expected_trace_sizes[capture_trace_call_count], "my_trace_collect(size)");
+	capture_trace_call_count++;
+
+	return collect_trace_ret_value;
 }
 
-#define PGUARD_MOCK_PAGE_ACCESS
+#define PGM_MOCK_PAGE_ACCESS
 static vm_address_t expected_inaccessible_page;
 static vm_address_t expected_read_write_page;
 static void
@@ -110,12 +123,15 @@ static malloc_zone_t wrapped_zone = {
 #pragma mark -
 #pragma mark Test Harness
 
-#include "../src/pguard_malloc.c"
+#include "../src/has_section.c"
+#include "../src/pgm_malloc.c"
+#include "../src/stack_trace.c"
 
 static slot_t slots[10];
 static metadata_t metadata[10];
-static pguard_zone_t zone = {
+static pgm_zone_t zone = {
 	.wrapped_zone = &wrapped_zone,
+	.min_alignment = 4,  // Use weird alignment to expose implicit assumptions.
 	.slots = slots,
 	.metadata = metadata
 };
@@ -124,4 +140,4 @@ static pguard_zone_t zone = {
 void malloc_report(uint32_t flags, const char *fmt, ...) { __builtin_trap(); }
 void malloc_report_simple(const char *fmt, ...) { __builtin_trap(); }
 
-#endif // _PGUARD_TESTING_H_
+#endif // _PGM_TESTING_H_

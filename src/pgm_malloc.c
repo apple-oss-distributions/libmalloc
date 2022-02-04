@@ -21,13 +21,14 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include "pguard_malloc.h"
+#include "pgm_malloc.h"
 
 #include <TargetConditionals.h>
 #if !TARGET_OS_DRIVERKIT
 # include <dlfcn.h>  // dladdr()
 #endif
 #include <mach/mach_time.h>  // mach_absolute_time()
+#include <sys/codesign.h>  // csops()
 
 #include "internal.h"
 
@@ -58,19 +59,24 @@ typedef struct {
 MALLOC_STATIC_ASSERT(PAGE_MAX_SIZE <= UINT16_MAX, "16 bits for page offsets");
 MALLOC_STATIC_ASSERT(sizeof(slot_t) == 8, "slot_t size");
 
-// typedef struct { ... } stack_trace_t;
+typedef struct MALLOC_PACKED {
+	uint64_t thread_id;
+	uint64_t time;
+	uint16_t trace_size;
+} alloc_info_t;
 
-#define STACK_TRACE_SIZE (MALLOC_TARGET_64BIT ? 144 : 80)
-MALLOC_STATIC_ASSERT(sizeof(stack_trace_t) <= STACK_TRACE_SIZE, "stack_trace_t size");
+MALLOC_STATIC_ASSERT(sizeof(alloc_info_t) == 18, "alloc_info_t size (packed)");
 
 typedef struct {
 	uint32_t slot;
-	stack_trace_t alloc_trace;
-	stack_trace_t dealloc_trace;
+	alloc_info_t alloc;
+	alloc_info_t dealloc;
+	uint8_t trace_buffer[216];  // ~62 frames (~3.5 bytes per 8-byte pointer)
 } metadata_t;
 
-#define METADATA_SIZE (MALLOC_TARGET_64BIT ? 296 : 168)
-MALLOC_STATIC_ASSERT(sizeof(metadata_t) <= METADATA_SIZE, "metadata_t size");
+MALLOC_STATIC_ASSERT(sizeof(((metadata_t *)NULL)->trace_buffer) <= UINT16_MAX,
+		"16 bits for trace buffer size");
+MALLOC_STATIC_ASSERT(sizeof(metadata_t) == 256, "metadata_t size");
 
 typedef struct {
 	// Malloc zone
@@ -82,14 +88,17 @@ typedef struct {
 	uint32_t max_allocations;
 	uint32_t max_metadata;
 	uint32_t sample_counter_range;
-	boolean_t signal_handler;
-	boolean_t debug_log;
+	uint32_t min_alignment;
+	bool signal_handler;
+	bool debug;
 	uint64_t debug_log_throttle_ms;
 
 	// Quarantine
 	size_t size;
 	vm_address_t begin;
 	vm_address_t end;
+	size_t region_size;
+	vm_address_t region_begin;
 
 	// Metadata
 	slot_t *slots;
@@ -106,15 +115,15 @@ typedef struct {
 	size_t size_in_use;
 	size_t max_size_in_use;
 	uint64_t last_log_time;
-} pguard_zone_t;
+} pgm_zone_t;
 
-MALLOC_STATIC_ASSERT(__offsetof(pguard_zone_t, malloc_zone) == 0,
-		"pguard_zone_t instances must be usable as regular zones");
-MALLOC_STATIC_ASSERT(__offsetof(pguard_zone_t, padding) < PAGE_MAX_SIZE,
+MALLOC_STATIC_ASSERT(__offsetof(pgm_zone_t, malloc_zone) == 0,
+		"pgm_zone_t instances must be usable as regular zones");
+MALLOC_STATIC_ASSERT(__offsetof(pgm_zone_t, padding) < PAGE_MAX_SIZE,
 		"First page is mapped read-only");
-MALLOC_STATIC_ASSERT(__offsetof(pguard_zone_t, lock) >= PAGE_MAX_SIZE,
+MALLOC_STATIC_ASSERT(__offsetof(pgm_zone_t, lock) >= PAGE_MAX_SIZE,
 		"Mutable state is on separate page");
-MALLOC_STATIC_ASSERT(sizeof(pguard_zone_t) < (2 * PAGE_MAX_SIZE),
+MALLOC_STATIC_ASSERT(sizeof(pgm_zone_t) < (2 * PAGE_MAX_SIZE),
 		"Zone fits on 2 pages");
 
 
@@ -125,32 +134,34 @@ MALLOC_STATIC_ASSERT(sizeof(pguard_zone_t) < (2 * PAGE_MAX_SIZE),
 
 MALLOC_ALWAYS_INLINE
 static inline boolean_t
-is_full(pguard_zone_t *zone)
+is_full(const pgm_zone_t *zone)
 {
 	return zone->num_allocations == zone->max_allocations;
 }
 
 static uint32_t rand_uniform(uint32_t upper_bound);
 
+#ifndef PGM_MOCK_SHOULD_SAMPLE_COUNTER
 MALLOC_ALWAYS_INLINE
 static inline boolean_t
 should_sample_counter(uint32_t counter_range)
 {
 	MALLOC_STATIC_ASSERT(sizeof(void *) >= sizeof(uint32_t), "Pointer is used as 32bit counter");
-	uint32_t counter = (uint32_t)_os_tsd_get_direct(__TSD_MALLOC_PGUARD_SAMPLE_COUNTER);
+	uint32_t counter = (uint32_t)_pthread_getspecific_direct(__TSD_MALLOC_PROB_GUARD_SAMPLE_COUNTER);
 	// 0 -> regenerate counter; 1 -> sample allocation
 	if (counter == 0) {
 		counter = rand_uniform(counter_range);
 	} else {
 		counter--;
 	}
-	_os_tsd_set_direct(__TSD_MALLOC_PGUARD_SAMPLE_COUNTER, (void *)(uintptr_t)counter);
+	_pthread_setspecific_direct(__TSD_MALLOC_PROB_GUARD_SAMPLE_COUNTER, (void *)(uintptr_t)counter);
 	return counter == 0;
 }
+#endif
 
 MALLOC_ALWAYS_INLINE
 static inline boolean_t
-should_sample(pguard_zone_t *zone, size_t size)
+should_sample(pgm_zone_t *zone, size_t size)
 {
 	boolean_t good_size = (size <= PAGE_SIZE);
 	boolean_t not_full = !is_full(zone); // Optimization: racy check; we check again in allocate() for correctness.
@@ -159,7 +170,7 @@ should_sample(pguard_zone_t *zone, size_t size)
 
 MALLOC_ALWAYS_INLINE
 static inline boolean_t
-is_guarded(pguard_zone_t *zone, vm_address_t addr)
+is_guarded(const pgm_zone_t *zone, vm_address_t addr)
 {
 	return zone->begin <= addr && addr < zone->end;
 }
@@ -168,14 +179,20 @@ is_guarded(pguard_zone_t *zone, vm_address_t addr)
 #pragma mark -
 #pragma mark Slot <-> Address Mapping
 
+// Prevent overflows on 32 bit platforms (sizeof(size_t) == sizeof(uint32_t)).
+static const uint32_t k_max_slots = (MALLOC_TARGET_64BIT) ?
+		UINT32_MAX :
+		(UINT32_MAX / PAGE_MAX_SIZE - 1) / 2;  // reverse of quarantine_size()
+
 static size_t
 quarantine_size(uint32_t num_slots)
 {
+	MALLOC_ASSERT(num_slots <= k_max_slots);
 	return (2 * num_slots + 1) * PAGE_SIZE;
 }
 
 static vm_address_t
-page_addr(pguard_zone_t *zone, uint32_t slot)
+page_addr(const pgm_zone_t *zone, uint32_t slot)
 {
 	MALLOC_ASSERT(slot < zone->num_slots);
 	uint32_t page = 1 + 2 * slot;
@@ -184,14 +201,14 @@ page_addr(pguard_zone_t *zone, uint32_t slot)
 }
 
 static vm_address_t
-block_addr(pguard_zone_t *zone, uint32_t slot) {
+block_addr(const pgm_zone_t *zone, uint32_t slot) {
 	vm_address_t page = page_addr(zone, slot);
 	uint16_t offset = zone->slots[slot].offset;
 	return page + offset;
 }
 
 static uint32_t
-page_idx(pguard_zone_t *zone, vm_address_t addr)
+page_idx(const pgm_zone_t *zone, vm_address_t addr)
 {
 	MALLOC_ASSERT(is_guarded(zone, addr));
 	vm_offset_t offset = addr - zone->begin;
@@ -199,7 +216,7 @@ page_idx(pguard_zone_t *zone, vm_address_t addr)
 }
 
 static boolean_t
-is_guard_page(pguard_zone_t *zone, vm_address_t addr)
+is_guard_page(const pgm_zone_t *zone, vm_address_t addr)
 {
 	return page_idx(zone, addr) % 2 == 0;
 }
@@ -209,7 +226,7 @@ is_guard_page(pguard_zone_t *zone, vm_address_t addr)
 #pragma mark Slot Lookup
 
 static uint32_t
-nearest_slot(pguard_zone_t *zone, vm_address_t addr)
+nearest_slot(const pgm_zone_t *zone, vm_address_t addr)
 {
 	if (addr < (zone->begin + PAGE_SIZE)) {
 		return 0;
@@ -245,7 +262,7 @@ typedef struct {
 MALLOC_STATIC_ASSERT(sizeof(slot_lookup_t) == 8, "slot_lookup_t size");
 
 static slot_lookup_t
-lookup_slot(pguard_zone_t *zone, vm_address_t addr)
+lookup_slot(const pgm_zone_t *zone, vm_address_t addr)
 {
 	MALLOC_ASSERT(is_guarded(zone, addr));
 	MALLOC_ASSERT(zone->begin % PAGE_SIZE == 0);
@@ -278,23 +295,26 @@ lookup_slot(pguard_zone_t *zone, vm_address_t addr)
 #pragma mark -
 #pragma mark Allocator Helpers
 
-// Darwin ABI requires 16 byte alignment.
-static const size_t k_min_alignment = 16;
+static bool
+is_power_of_2(size_t n) {
+	return __builtin_popcountl(n) == 1;
+}
 
 static size_t
-aligned_size(size_t size)
+block_size(size_t size, size_t min_alignment)
 {
+	MALLOC_ASSERT(is_power_of_2(min_alignment));
 	if (size == 0) {
-		return k_min_alignment;
+		return min_alignment;
 	}
-	const size_t mask = (k_min_alignment - 1);
+	const size_t mask = (min_alignment - 1);
 	return (size + mask) & ~mask;
 }
 
 // Current implementation: round-robin; delays reuse until at least (num_slots - max_allocations).
 // Possible alternatives: LRU, random.
 static uint32_t
-choose_available_slot(pguard_zone_t *zone)
+choose_available_slot(pgm_zone_t *zone)
 {
 	uint32_t slot = zone->rr_slot_index;
 	while (zone->slots[slot].state == ss_allocated) {
@@ -305,19 +325,25 @@ choose_available_slot(pguard_zone_t *zone)
 	return slot;
 }
 
-// Choose a random metadata index.
 static uint32_t
-choose_metadata(pguard_zone_t *zone)
+choose_metadata(pgm_zone_t *zone, uint32_t slot)
 {
 	if (zone->num_metadata < zone->max_metadata) {
 		return zone->num_metadata++;
 	}
-	return rand_uniform(zone->max_metadata);
-}
 
-static boolean_t
-is_power_of_2(size_t n) {
-	return __builtin_popcountl(n) == 1;
+	uint32_t old_index = zone->slots[slot].metadata;
+	if (zone->metadata[old_index].slot == slot) {
+		return old_index;
+	}
+
+	while (true) {
+		uint32_t index = rand_uniform(zone->max_metadata);
+		uint32_t s = zone->metadata[index].slot;
+		if (zone->slots[s].state == ss_freed) {
+			return index;
+		}
+	}
 }
 
 static uint16_t
@@ -333,21 +359,41 @@ choose_offset_on_page(size_t size, size_t alignment, uint16_t page_size) {
 	return (page_size - size) & mask;
 }
 
+MALLOC_ALWAYS_INLINE
+static inline size_t my_trace_collect(uint8_t *buffer, size_t size);
+
+MALLOC_ALWAYS_INLINE
+static inline void capture_trace(metadata_t *metadata, bool alloc)
+{
+	alloc_info_t *info = alloc ? &metadata->alloc : &metadata->dealloc;
+	info->thread_id = _pthread_threadid_self_np_direct();
+	info->time = mach_absolute_time();
+
+	size_t offset;
+	if (alloc) {
+		offset = 0;
+		metadata->dealloc = (alloc_info_t){};
+	} else {
+		offset = MIN(metadata->alloc.trace_size, sizeof(metadata->trace_buffer) / 2);
+		metadata->alloc.trace_size = offset;
+	}
+	uint8_t *buffer = &metadata->trace_buffer[offset];
+	size_t size = sizeof(metadata->trace_buffer) - offset;
+	info->trace_size = my_trace_collect(buffer, size);
+}
+
 
 #pragma mark -
 #pragma mark Allocator Functions
 
-MALLOC_ALWAYS_INLINE
-static inline void capture_trace(stack_trace_t *trace);
-
 static void mark_inaccessible(vm_address_t page);
 static void mark_read_write(vm_address_t page);
-static void log_zone_state(pguard_zone_t *zone, const char *type, vm_address_t addr);
+static void debug_zone(pgm_zone_t *zone, const char *label, vm_address_t addr);
 
 // Note: the functions below require locking.
 
 static size_t
-lookup_size(pguard_zone_t *zone, vm_address_t addr)
+lookup_size(pgm_zone_t *zone, vm_address_t addr)
 {
 	slot_lookup_t res = lookup_slot(zone, addr);
 	if (!res.live_block_addr) {
@@ -357,20 +403,25 @@ lookup_size(pguard_zone_t *zone, vm_address_t addr)
 }
 
 static vm_address_t
-allocate(pguard_zone_t *zone, size_t size, size_t alignment)
+allocate(pgm_zone_t *zone, size_t size, size_t alignment)
 {
 	MALLOC_ASSERT(size <= PAGE_SIZE);
-	MALLOC_ASSERT(k_min_alignment <= alignment && alignment <= PAGE_SIZE);
+	MALLOC_ASSERT(zone->min_alignment <= alignment && alignment <= PAGE_SIZE);
 	MALLOC_ASSERT(is_power_of_2(alignment));
 
 	if (is_full(zone)) {
 		return (vm_address_t)NULL;
 	}
 
-	size = aligned_size(size);
+	size = block_size(size, zone->min_alignment);
 	uint32_t slot = choose_available_slot(zone);
-	uint32_t metadata = choose_metadata(zone);
+	uint32_t metadata = choose_metadata(zone, slot);
 	uint16_t offset = choose_offset_on_page(size, alignment, PAGE_SIZE);
+
+	// Mark page writable before updating metadata.  Ensures metadata is correct
+	// whenever a fault could be triggered.
+	vm_address_t page = page_addr(zone, slot);
+	mark_read_write(page);
 
 	zone->slots[slot] = (slot_t){
 		.state = ss_allocated,
@@ -379,51 +430,50 @@ allocate(pguard_zone_t *zone, size_t size, size_t alignment)
 		.offset = offset
 	};
 	zone->metadata[metadata].slot = slot;
-	capture_trace(&zone->metadata[metadata].alloc_trace);
-
-	vm_address_t page = page_addr(zone, slot);
-	mark_read_write(page);
+	capture_trace(&zone->metadata[metadata], /*alloc=*/true);
 
 	zone->num_allocations++;
 	zone->size_in_use += size;
 	zone->max_size_in_use = MAX(zone->size_in_use, zone->max_size_in_use);
 
 	vm_address_t addr = page + offset;
-	log_zone_state(zone, "allocated", addr);
+	debug_zone(zone, "allocated", addr);
 
 	return addr;
 }
 
 static void
-deallocate(pguard_zone_t *zone, vm_address_t addr)
+deallocate(pgm_zone_t *zone, vm_address_t addr)
 {
 	slot_lookup_t res = lookup_slot(zone, addr);
 	if (!res.live_block_addr) {
 		// TODO(yln): error report; TODO(yln): distinguish between most likely cause
 		// corrupted pointer (unused, *) or (*, !block_ptr) and double free (freed, block_ptr)
-		MALLOC_REPORT_FATAL_ERROR(addr, "PGuard: invalid pointer passed to free");
+		MALLOC_REPORT_FATAL_ERROR(addr, "ProbGuard: invalid pointer passed to free");
 	}
 
 	uint32_t slot = res.slot;
 	uint32_t metadata = zone->slots[slot].metadata;
 
 	zone->slots[slot].state = ss_freed;
-	capture_trace(&zone->metadata[metadata].dealloc_trace);
-
-	vm_address_t page = page_addr(zone, slot);
-	mark_inaccessible(page);
+	capture_trace(&zone->metadata[metadata], /*alloc=*/false);
 
 	zone->num_allocations--;
 	zone->size_in_use -= zone->slots[slot].size;
 
-	log_zone_state(zone, "freed", addr);
+	// Mark page inaccessible after updating metadata.  Ensures metadata is
+	// correct whenever a fault could be triggered.
+	vm_address_t page = page_addr(zone, slot);
+	mark_inaccessible(page);
+
+	debug_zone(zone, "freed", addr);
 }
 
 #define DELEGATE(function, args...) \
 	zone->wrapped_zone->function(zone->wrapped_zone, args)
 
 static vm_address_t
-reallocate(pguard_zone_t *zone, vm_address_t addr, size_t new_size, boolean_t sample)
+reallocate(pgm_zone_t *zone, vm_address_t addr, size_t new_size, boolean_t sample)
 {
 	boolean_t guarded = is_guarded(zone, addr);
 	// Note: should_sample() is stateful.
@@ -437,12 +487,12 @@ reallocate(pguard_zone_t *zone, vm_address_t addr, size_t new_size, boolean_t sa
 	}
 	if (!size) {
 		// TODO(yln): error report
-		MALLOC_REPORT_FATAL_ERROR(addr, "PGuard: invalid pointer passed to realloc");
+		MALLOC_REPORT_FATAL_ERROR(addr, "ProbGuard: invalid pointer passed to realloc");
 	}
 
 	vm_address_t new_addr;
 	if (sample && !is_full(zone)) {
-		new_addr = allocate(zone, new_size, k_min_alignment);
+		new_addr = allocate(zone, new_size, zone->min_alignment);
 		MALLOC_ASSERT(new_addr);
 	} else {
 		new_addr = (vm_address_t)DELEGATE(malloc, new_size);
@@ -464,10 +514,10 @@ reallocate(pguard_zone_t *zone, vm_address_t addr, size_t new_size, boolean_t sa
 #pragma mark -
 #pragma mark Lock Helpers
 
-static void init_lock(pguard_zone_t *zone) { _malloc_lock_init(&zone->lock); }
-static void lock(pguard_zone_t *zone) { _malloc_lock_lock(&zone->lock); }
-static void unlock(pguard_zone_t *zone) { _malloc_lock_unlock(&zone->lock); }
-static boolean_t trylock(pguard_zone_t *zone) { return _malloc_lock_trylock(&zone->lock); }
+static void init_lock(pgm_zone_t *zone) { _malloc_lock_init(&zone->lock); }
+static void lock(pgm_zone_t *zone) { _malloc_lock_lock(&zone->lock); }
+static void unlock(pgm_zone_t *zone) { _malloc_lock_unlock(&zone->lock); }
+static boolean_t trylock(pgm_zone_t *zone) { return _malloc_lock_trylock(&zone->lock); }
 
 
 #pragma mark -
@@ -496,7 +546,7 @@ static boolean_t trylock(pguard_zone_t *zone) { return _malloc_lock_trylock(&zon
 
 
 static size_t
-pguard_size(pguard_zone_t *zone, const void *ptr)
+pgm_size(pgm_zone_t *zone, const void *ptr)
 {
 	DELEGATE_UNGUARDED(ptr, size, ptr);
 	lock(zone);
@@ -506,42 +556,42 @@ pguard_size(pguard_zone_t *zone, const void *ptr)
 }
 
 static void *
-pguard_malloc(pguard_zone_t *zone, size_t size)
+pgm_malloc(pgm_zone_t *zone, size_t size)
 {
-	SAMPLED_ALLOCATE(size, k_min_alignment, malloc, size);
+	SAMPLED_ALLOCATE(size, zone->min_alignment, malloc, size);
 	return ptr;
 }
 
 static void *
-pguard_calloc(pguard_zone_t *zone, size_t num_items, size_t size)
+pgm_calloc(pgm_zone_t *zone, size_t num_items, size_t size)
 {
 	size_t total_size;
 	if (os_unlikely(os_mul_overflow(num_items, size, &total_size))) {
 		return DELEGATE(calloc, num_items, size);
 	}
-	SAMPLED_ALLOCATE(total_size, k_min_alignment, calloc, num_items, size);
+	SAMPLED_ALLOCATE(total_size, zone->min_alignment, calloc, num_items, size);
 	memset(ptr, 0, total_size);
 	return ptr;
 }
 
 static void *
-pguard_valloc(pguard_zone_t *zone, size_t size)
+pgm_valloc(pgm_zone_t *zone, size_t size)
 {
 	SAMPLED_ALLOCATE(size, /*alignment=*/PAGE_SIZE, valloc, size);
 	return ptr;
 }
 
 static void
-pguard_free(pguard_zone_t *zone, void *ptr)
+pgm_free(pgm_zone_t *zone, void *ptr)
 {
 	GUARDED_DEALLOCATE(ptr, free, ptr);
 }
 
 static void *
-pguard_realloc(pguard_zone_t *zone, void *ptr, size_t new_size)
+pgm_realloc(pgm_zone_t *zone, void *ptr, size_t new_size)
 {
 	if (os_unlikely(!ptr)) {
-		return pguard_malloc(zone, new_size);
+		return pgm_malloc(zone, new_size);
 	}
 	boolean_t sample = should_sample(zone, new_size);
 	if (os_likely(!sample)) {
@@ -555,16 +605,15 @@ pguard_realloc(pguard_zone_t *zone, void *ptr, size_t new_size)
 
 static void my_vm_deallocate(vm_address_t addr, size_t size);
 static void
-pguard_destroy(pguard_zone_t *zone)
+pgm_destroy(pgm_zone_t *zone)
 {
-	DELEGATE(free, zone->metadata);
-	DELEGATE(free, zone->slots);
-	my_vm_deallocate(zone->begin, zone->size);
-	my_vm_deallocate((vm_address_t)zone, sizeof(pguard_zone_t));
+	malloc_destroy_zone(zone->wrapped_zone);  // frees slots and metadata
+	my_vm_deallocate(zone->region_begin, zone->region_size);
+	my_vm_deallocate((vm_address_t)zone, sizeof(pgm_zone_t));
 }
 
 static unsigned
-pguard_batch_malloc(pguard_zone_t *zone, size_t size, void **results, unsigned count)
+pgm_batch_malloc(pgm_zone_t *zone, size_t size, void **results, unsigned count)
 {
 	if (os_unlikely(count == 0)) {
 		return 0;
@@ -581,7 +630,7 @@ pguard_batch_malloc(pguard_zone_t *zone, size_t size, void **results, unsigned c
 
 	for (uint32_t i = 0; i < sample_count; i++) {
 		lock(zone);
-		void *ptr = (void *)allocate(zone, size, k_min_alignment);
+		void *ptr = (void *)allocate(zone, size, zone->min_alignment);
 		unlock(zone);
 		if (!ptr) {
 			sample_count = i;
@@ -600,7 +649,7 @@ pguard_batch_malloc(pguard_zone_t *zone, size_t size, void **results, unsigned c
 }
 
 static void
-pguard_batch_free(pguard_zone_t *zone, void **to_be_freed, unsigned count)
+pgm_batch_free(pgm_zone_t *zone, void **to_be_freed, unsigned count)
 {
 	for (uint32_t i = 0; i < count; i++) {
 		vm_address_t addr = (vm_address_t)to_be_freed[i];
@@ -615,35 +664,124 @@ pguard_batch_free(pguard_zone_t *zone, void **to_be_freed, unsigned count)
 }
 
 static void *
-pguard_memalign(pguard_zone_t *zone, size_t alignment, size_t size)
+pgm_memalign(pgm_zone_t *zone, size_t alignment, size_t size)
 {
 	// Delegate for (alignment > page size) and invalid alignment sizes.
 	if (alignment > PAGE_SIZE || !is_power_of_2(alignment) || alignment < sizeof(void *)) {
 		return DELEGATE(memalign, alignment, size);
 	}
-	size_t adj_alignment = MAX(alignment, k_min_alignment);
+	size_t adj_alignment = MAX(alignment, zone->min_alignment);
 	SAMPLED_ALLOCATE(size, adj_alignment, memalign, alignment, size);
 	return ptr;
 }
 
 static void
-pguard_free_definite_size(pguard_zone_t *zone, void *ptr, size_t size)
+pgm_free_definite_size(pgm_zone_t *zone, void *ptr, size_t size)
 {
 	GUARDED_DEALLOCATE(ptr, free_definite_size, ptr, size);
 }
 
-static size_t
-pguard_pressure_relief(pguard_zone_t *zone, size_t goal)
+static boolean_t
+pgm_claimed_address(pgm_zone_t *zone, void *ptr)
 {
-	// We consume a constant amount of memory, so just delegate.
-	return DELEGATE(pressure_relief, goal);
+	return is_guarded(zone, (vm_address_t)ptr);
 }
 
-static boolean_t
-pguard_claimed_address(pguard_zone_t *zone, void *ptr)
+
+#pragma mark -
+#pragma mark Integrity Checks
+
+static const size_t k_zone_spacer = 32 * 1024 * 1024;  // 32 MB
+
+static bool
+check_configuration(const pgm_zone_t *zone)
 {
-	DELEGATE_UNGUARDED(ptr, claimed_address, ptr);
-	return TRUE;
+	// 0 < max_allocations << max_metadata <= num_slots <= k_max_slots
+	return (0 < zone->max_allocations) &&
+			(zone->max_allocations <= zone->max_metadata / 2) &&  // choose_metadata() relies on max_allocations << max_metadata
+			(zone->max_metadata <= zone->num_slots) &&
+			(zone->num_slots <= k_max_slots) &&
+			(zone->sample_counter_range > 0) &&
+			(zone->min_alignment == 1 || zone->min_alignment == 16);  // strict alignment || Darwin ABI alignment
+}
+
+static bool
+check_zone(const pgm_zone_t *zone)
+{
+	return check_configuration(zone) &&
+			// Quarantine
+			(zone->size == quarantine_size(zone->num_slots)) &&
+			(zone->begin + zone->size == zone->end) &&
+			(zone->begin < zone->end) &&
+			(zone->region_size == 2 * k_zone_spacer + zone->size) &&
+			(zone->region_begin == zone->begin - k_zone_spacer) &&
+			(zone->region_begin < zone->begin) &&
+			// Mutable state
+			(zone->num_allocations <= zone->max_allocations) &&
+			(zone->num_metadata <= zone->max_metadata) &&
+			(zone->num_allocations <= zone->num_metadata) &&
+			(zone->rr_slot_index < zone->num_slots) &&
+			// Metadata
+			(zone->slots && zone->metadata) &&
+			// Statistics
+			(zone->size_in_use <= zone->max_size_in_use);
+}
+
+static bool
+check_slot(const pgm_zone_t *zone, const slot_t *slot)
+{
+	if (slot->state == ss_unused) {
+		return true;
+	}
+	return (slot->state <= ss_freed) &&
+			(slot->metadata < zone->num_metadata) &&
+			(slot->size <= PAGE_SIZE) &&
+			(slot->size == block_size(slot->size, zone->min_alignment)) &&
+			(slot->offset <= PAGE_SIZE) &&
+			(slot->offset % zone->min_alignment == 0) &&
+			((size_t)slot->offset + slot->size <= PAGE_SIZE);
+}
+
+static bool
+check_slots(const pgm_zone_t *zone)
+{
+	uint32_t num_allocations = 0;
+	size_t size_in_use = 0;
+
+	for (uint32_t i = 0; i < zone->num_slots; i++) {
+		slot_t *slot = &zone->slots[i];
+		if (!check_slot(zone, slot)) {
+			return false;
+		}
+		if (slot->state == ss_allocated) {
+			num_allocations++;
+			size_in_use += zone->slots[i].size;
+		}
+	}
+
+	return (num_allocations == zone->num_allocations) &&
+			(size_in_use == zone->size_in_use);
+}
+
+static bool
+check_md(const pgm_zone_t *zone, const metadata_t *md)
+{
+	ptrdiff_t index = md - zone->metadata;
+	return (md->slot < zone->num_slots) &&
+			(zone->slots[md->slot].metadata == index) &&
+			((size_t)md->alloc.trace_size + md->dealloc.trace_size <= sizeof(md->trace_buffer));
+}
+
+static bool
+check_metadata(const pgm_zone_t *zone)
+{
+	for (uint32_t i = 0; i < zone->num_metadata; i++) {
+		metadata_t *metadata = &zone->metadata[i];
+		if (!check_md(zone, metadata)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 
@@ -652,36 +790,40 @@ pguard_claimed_address(pguard_zone_t *zone, void *ptr)
 
 typedef enum { rt_zone_only, rt_slots, rt_slots_and_metadata } read_type_t;
 
-#define READ(remote_address, size, local_memory) \
+#define READ(remote_address, size, local_memory, checker, zone) \
 { \
 	kern_return_t kr = reader(task, (vm_address_t)remote_address, size, (void **)local_memory); \
 	if (kr != KERN_SUCCESS) return kr; \
+	if (!checker(zone)) return KERN_FAILURE; \
 }
 
 static kern_return_t
-read_zone(task_t task, vm_address_t zone_address, memory_reader_t reader, pguard_zone_t *zone, read_type_t read_type)
+read_zone(task_t task, vm_address_t zone_address, memory_reader_t reader, pgm_zone_t *zone, read_type_t read_type)
 {
-	pguard_zone_t *zone_ptr;
-	READ(zone_address, sizeof(pguard_zone_t), &zone_ptr);
+	if (!reader && task == mach_task_self()) {
+		reader = _malloc_default_reader;
+	}
+
+	pgm_zone_t *zone_ptr;
+	READ(zone_address, sizeof(pgm_zone_t), &zone_ptr, check_zone, zone_ptr);
 	*zone = *zone_ptr;  // Copy to writable memory
-	// Leaks zone_ptr if called from CrashReporter (crash_reporter_memory_reader_t allocates new buffers)
 
 	if (read_type >= rt_slots) {
-		READ(zone->slots, zone->num_slots * sizeof(slot_t), &zone->slots);
+		READ(zone->slots, zone->num_slots * sizeof(slot_t), &zone->slots, check_slots, zone);
 	}
 	if (read_type >= rt_slots_and_metadata) {
-		READ(zone->metadata, zone->max_metadata * sizeof(metadata_t), &zone->metadata);
+		READ(zone->metadata, zone->max_metadata * sizeof(metadata_t), &zone->metadata, check_metadata, zone);
 	}
 	return KERN_SUCCESS;
 }
 
 #define READ_ZONE(zone, read_type) \
-	pguard_zone_t zone_copy; \
+	pgm_zone_t zone_copy; \
 	{ \
 		kern_return_t kr = read_zone(task, zone_address, reader, &zone_copy, read_type); \
 		if (kr != KERN_SUCCESS) return kr; \
 	} \
-	pguard_zone_t *zone = &zone_copy;
+	pgm_zone_t *zone = &zone_copy;
 
 #define RECORD(remote_address, size_, type) \
 { \
@@ -690,13 +832,10 @@ read_zone(task_t task, vm_address_t zone_address, memory_reader_t reader, pguard
 }
 
 static kern_return_t
-pguard_enumerator(task_t task, void *context, unsigned type_mask,
+pgm_enumerator(task_t task, void *context, unsigned type_mask,
 		vm_address_t zone_address, memory_reader_t reader,
 		vm_range_recorder_t recorder)
 {
-	MALLOC_ASSERT(reader);
-	MALLOC_ASSERT(recorder);
-
 	boolean_t record_allocs = (type_mask & MALLOC_PTR_IN_USE_RANGE_TYPE);
 	boolean_t record_regions = (type_mask & MALLOC_PTR_REGION_RANGE_TYPE);
 	if (!record_allocs && !record_regions) {
@@ -727,7 +866,7 @@ pguard_enumerator(task_t task, void *context, unsigned type_mask,
 }
 
 static void
-pguard_statistics(pguard_zone_t *zone, malloc_statistics_t *stats)
+pgm_statistics(pgm_zone_t *zone, malloc_statistics_t *stats)
 {
 	*stats = (malloc_statistics_t){
 		.blocks_in_use = zone->num_allocations,
@@ -738,20 +877,20 @@ pguard_statistics(pguard_zone_t *zone, malloc_statistics_t *stats)
 }
 
 static kern_return_t
-pguard_statistics_task(task_t task, vm_address_t zone_address, memory_reader_t reader, malloc_statistics_t *stats)
+pgm_statistics_task(task_t task, vm_address_t zone_address, memory_reader_t reader, malloc_statistics_t *stats)
 {
 	READ_ZONE(zone, rt_zone_only);
-	pguard_statistics(zone, stats);
+	pgm_statistics(zone, stats);
 	return KERN_SUCCESS;
 }
 
 static void
-print_zone(pguard_zone_t *zone, boolean_t verbose, print_task_printer_t printer) {
+print_zone(pgm_zone_t *zone, boolean_t verbose, print_task_printer_t printer) {
 	malloc_statistics_t stats;
-	pguard_statistics(zone, &stats);
-	printer("PGuard zone: slots: %u, slots in use: %u, size in use: %llu, max size in use: %llu, allocated size: %llu\n",
+	pgm_statistics(zone, &stats);
+	printer("ProbGuard zone: slots: %u, slots in use: %u, size in use: %llu, max size in use: %llu, allocated size: %llu\n",
 					zone->num_slots, stats.blocks_in_use, stats.size_in_use, stats.max_size_in_use, stats.size_allocated);
-	printer("Quarantine: size: %llu, address range: [%p - %p]\n", zone->size, zone->begin, zone->end);
+	printer("Quarantine: size: %llu, address range: [%p - %p)\n", zone->size, zone->begin, zone->end);
 
 	printer("Slots (#, state, offset, size, block address):\n");
 	for (uint32_t i = 0; i < zone->num_slots; i++) {
@@ -769,18 +908,18 @@ print_zone(pguard_zone_t *zone, boolean_t verbose, print_task_printer_t printer)
 
 
 static void
-pguard_print(pguard_zone_t *zone, boolean_t verbose)
+pgm_print(pgm_zone_t *zone, boolean_t verbose)
 {
 	print_zone(zone, verbose, malloc_report_simple);
 }
 
 static void
-pguard_print_task(task_t task, unsigned level, vm_address_t zone_address, memory_reader_t reader, print_task_printer_t printer)
+pgm_print_task(task_t task, unsigned level, vm_address_t zone_address, memory_reader_t reader, print_task_printer_t printer)
 {
-	pguard_zone_t zone;
+	pgm_zone_t zone;
 	kern_return_t kr = read_zone(task, zone_address, reader, &zone, rt_slots);
 	if (kr != KERN_SUCCESS) {
-		printer("Failed to read PGuard zone at %p\n", zone_address);
+		printer("Failed to read ProbGuard zone at %p\n", zone_address);
 		return;
 	}
 
@@ -789,43 +928,43 @@ pguard_print_task(task_t task, unsigned level, vm_address_t zone_address, memory
 }
 
 static void
-pguard_log(pguard_zone_t *zone, void *address)
+pgm_log(pgm_zone_t *zone, void *address)
 {
 	// Unsupported.
 }
 
 static size_t
-pguard_good_size(pguard_zone_t *zone, size_t size)
+pgm_good_size(pgm_zone_t *zone, size_t size)
 {
 	return DELEGATE(introspect->good_size, size);
 }
 
 static boolean_t
-pguard_check(pguard_zone_t *zone)
+pgm_check(pgm_zone_t *zone)
 {
-	return TRUE; // Zone is always in a consistent state.
+	return check_zone(zone) && check_slots(zone) && check_metadata(zone);
 }
 
 static void
-pguard_force_lock(pguard_zone_t *zone)
+pgm_force_lock(pgm_zone_t *zone)
 {
 	lock(zone);
 }
 
 static void
-pguard_force_unlock(pguard_zone_t *zone)
+pgm_force_unlock(pgm_zone_t *zone)
 {
 	unlock(zone);
 }
 
 static void
-pguard_reinit_lock(pguard_zone_t *zone)
+pgm_reinit_lock(pgm_zone_t *zone)
 {
 	init_lock(zone);
 }
 
 static boolean_t
-pguard_zone_locked(pguard_zone_t *zone)
+pgm_zone_locked(pgm_zone_t *zone)
 {
 	boolean_t lock_taken = trylock(zone);
 	if (lock_taken) {
@@ -843,26 +982,26 @@ pguard_zone_locked(pguard_zone_t *zone)
 
 static const malloc_introspection_t introspection_template = {
 	// Block and region enumeration
-	.enumerator = FN_PTR(pguard_enumerator),
+	.enumerator = FN_PTR(pgm_enumerator),
 
 	// Statistics
-	.statistics = FN_PTR(pguard_statistics),
-	.task_statistics = FN_PTR(pguard_statistics_task),
+	.statistics = FN_PTR(pgm_statistics),
+	.task_statistics = FN_PTR(pgm_statistics_task),
 
 	// Logging
-	.print = FN_PTR(pguard_print),
-	.print_task = FN_PTR(pguard_print_task),
-	.log = FN_PTR(pguard_log),
+	.print = FN_PTR(pgm_print),
+	.print_task = FN_PTR(pgm_print_task),
+	.log = FN_PTR(pgm_log),
 
 	// Queries
-	.good_size = FN_PTR(pguard_good_size),
-	.check = FN_PTR(pguard_check),
+	.good_size = FN_PTR(pgm_good_size),
+	.check = FN_PTR(pgm_check),
 
 	// Locking
-	.force_lock = FN_PTR(pguard_force_lock),
-	.force_unlock = FN_PTR(pguard_force_unlock),
-	.reinit_lock = FN_PTR(pguard_reinit_lock),
-	.zone_locked = FN_PTR(pguard_zone_locked),
+	.force_lock = FN_PTR(pgm_force_lock),
+	.force_unlock = FN_PTR(pgm_force_unlock),
+	.reinit_lock = FN_PTR(pgm_reinit_lock),
+	.zone_locked = FN_PTR(pgm_zone_locked),
 
 	// Discharge checking
 	.enable_discharge_checking = NULL,
@@ -881,33 +1020,33 @@ static const malloc_zone_t malloc_zone_template = {
 	.reserved2 = NULL,
 
 	// Standard operations
-	.size = FN_PTR(pguard_size),
-	.malloc = FN_PTR(pguard_malloc),
-	.calloc = FN_PTR(pguard_calloc),
-	.valloc = FN_PTR(pguard_valloc),
-	.free = FN_PTR(pguard_free),
-	.realloc = FN_PTR(pguard_realloc),
-	.destroy = FN_PTR(pguard_destroy),
+	.size = FN_PTR(pgm_size),
+	.malloc = FN_PTR(pgm_malloc),
+	.calloc = FN_PTR(pgm_calloc),
+	.valloc = FN_PTR(pgm_valloc),
+	.free = FN_PTR(pgm_free),
+	.realloc = FN_PTR(pgm_realloc),
+	.destroy = FN_PTR(pgm_destroy),
 
 	// Batch operations
-	.batch_malloc = FN_PTR(pguard_batch_malloc),
-	.batch_free = FN_PTR(pguard_batch_free),
+	.batch_malloc = FN_PTR(pgm_batch_malloc),
+	.batch_free = FN_PTR(pgm_batch_free),
 
 	// Introspection
-	.zone_name = NULL, // Do not initialize with static string; set_zone_name() frees this pointer.
+	.zone_name = "ProbGuardMallocZone",
 	.version = 12,
 	.introspect = (malloc_introspection_t *)&introspection_template, // Effectively const.
 
 	// Specialized operations
-	.memalign = FN_PTR(pguard_memalign),
-	.free_definite_size = FN_PTR(pguard_free_definite_size),
-	.pressure_relief = FN_PTR(pguard_pressure_relief),
-	.claimed_address = FN_PTR(pguard_claimed_address)
+	.memalign = FN_PTR(pgm_memalign),
+	.free_definite_size = FN_PTR(pgm_free_definite_size),
+	.pressure_relief = NULL,
+	.claimed_address = FN_PTR(pgm_claimed_address)
 };
 
 
 #pragma mark -
-#pragma mark Zone Configuration
+#pragma mark Configuration Options
 
 static const char *
 env_var(const char *name)
@@ -930,18 +1069,100 @@ env_bool(const char *name) {
 	return value[0] == '1';
 }
 
-boolean_t
-pguard_enabled(void)
-{
-	if (env_var("MallocPGuard")) {
-		return env_bool("MallocPGuard");
-	}
 #if CONFIG_FEATUREFLAGS_SIMPLE
-	return os_feature_enabled_simple(libmalloc, PGuardAllProcesses, FALSE) ||
-			(os_feature_enabled_simple(libmalloc, PGuardViaLaunchd, FALSE) && env_bool("MallocPGuardViaLaunchd"));
+# define FEATURE_FLAG(feature, default) os_feature_enabled_simple(libmalloc, feature, default)
 #else
-	return FALSE;
+# define FEATURE_FLAG(feature, default) (default)
 #endif
+
+
+#pragma mark -
+#pragma mark Zone Configuration
+
+static bool
+is_platform_binary(void)
+{
+	uint32_t flags = 0;
+	int err = csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
+	if (err) {
+		return false;
+	}
+	return (flags & CS_PLATFORM_BINARY);
+}
+
+extern bool main_image_has_section(const char* segname, const char *sectname);
+static bool
+should_activate(bool internal_build)
+{
+	if (!internal_build && !is_platform_binary()) {
+		return false;
+	}
+#if TARGET_OS_OSX
+	uint32_t activation_rate = (internal_build ? 250 : 1000);
+	if (rand_uniform(activation_rate) != 0) {
+		return false;
+	}
+#else
+	if (!env_bool("MallocProbGuardViaLaunchd")) {
+		return false;
+	}
+#endif
+	if (main_image_has_section("__DATA", "__pgm_opt_out")) {
+		return false;
+	}
+	return true;
+}
+
+#if TARGET_OS_WATCH
+static bool
+is_high_memory_device(void)
+{
+	uint64_t high_memory = 1.2 * 1024 * 1024 * 1024;  // 1.2 GB
+	return platform_hw_memsize() > high_memory;
+}
+#endif
+
+bool
+pgm_should_enable(bool internal_build)
+{
+	if (env_var("MallocProbGuard")) {
+		return env_bool("MallocProbGuard");
+	}
+	if (FEATURE_FLAG(ProbGuard, true) && should_activate(internal_build)) {
+#if TARGET_OS_OSX || TARGET_OS_IOS
+		return true;
+#elif TARGET_OS_TV
+		if (internal_build) {
+			return true;
+		}
+#elif TARGET_OS_WATCH
+		if (internal_build && is_high_memory_device()) {
+			return true;
+		}
+#endif
+	}
+	if (FEATURE_FLAG(ProbGuardAllProcesses, false)) {
+		return true;
+	}
+	return false;
+}
+
+static uint32_t
+choose_memory_budget_in_kb(void)
+{
+	return (TARGET_OS_OSX ? 8 : 2) * 1024;
+}
+
+// TODO(yln): uniform sampling is likely not optimal here, since we will tend to
+// sample around the average of our range, which is probably more frequent than
+// what we want.  We probably want the average to be less frequent, but still be
+// able to reach the "very frequent" end of our range occassionally.  Consider
+// using a geometric (or other weighted distribution) here.
+static uint32_t
+choose_sample_rate(void)
+{
+	uint32_t min = 500, max = 10000;
+	return rand_uniform(max - min) + min;
 }
 
 static const double k_slot_multiplier = 10.0;
@@ -950,7 +1171,7 @@ static uint32_t
 compute_max_allocations(size_t memory_budget_in_kb)
 {
 	size_t memory_budget = memory_budget_in_kb * 1024;
-	size_t fixed_overhead = round_page(sizeof(pguard_zone_t));
+	size_t fixed_overhead = round_page(sizeof(pgm_zone_t));
 	size_t vm_map_entry_size = 80; // struct vm_map_entry in <vm/vm_map.h>
 	size_t per_allocation_overhead =
 			PAGE_SIZE +
@@ -961,44 +1182,34 @@ compute_max_allocations(size_t memory_budget_in_kb)
 
 	uint32_t max_allocations = (uint32_t)((memory_budget - fixed_overhead) / per_allocation_overhead);
 	if (memory_budget < fixed_overhead || max_allocations == 0) {
-		MALLOC_REPORT_FATAL_ERROR(0, "PGuard: memory budget too small");
+		MALLOC_REPORT_FATAL_ERROR(0, "ProbGuard: memory budget too small");
 	}
 	return max_allocations;
 }
 
-static uint32_t
-choose_sample_rate(void)
-{
-#if CONFIG_FEATUREFLAGS_SIMPLE
-	if (os_feature_enabled_simple(libmalloc, PGuardAllProcesses, FALSE)) {
-		return 1000;
-	}
-#endif
-	uint32_t rates[] = {10, 50, 100, 500, 1000, 5000};
-	const uint32_t count = (sizeof(rates) / sizeof(rates[0]));
-	return rates[rand_uniform(count)];
-}
-
 static void
-configure_zone(pguard_zone_t *zone) {
-	uint32_t memory_budget_in_kb = env_uint("MallocPGuardMemoryBudgetInKB", 2 * 1024); // 2MB
-	zone->max_allocations = env_uint("MallocPGuardAllocations", compute_max_allocations(memory_budget_in_kb));
-	zone->num_slots = env_uint("MallocPGuardSlots", k_slot_multiplier * zone->max_allocations);
-	zone->max_metadata = env_uint("MallocPGuardMetadata", k_metadata_multiplier * zone->max_allocations);
-	uint32_t sample_rate = env_uint("MallocPGuardSampleRate", choose_sample_rate());
-	if (sample_rate == 0) {
-		MALLOC_REPORT_FATAL_ERROR(0, "PGuard: sample rate cannot be 0");
-	}
+configure_zone(pgm_zone_t *zone)
+{
+	uint32_t memory_budget_in_kb = env_uint("MallocProbGuardMemoryBudgetInKB", choose_memory_budget_in_kb());
+	zone->max_allocations = env_uint("MallocProbGuardAllocations", compute_max_allocations(memory_budget_in_kb));
+	zone->num_slots = env_uint("MallocProbGuardSlots", k_slot_multiplier * zone->max_allocations);
+	zone->max_metadata = env_uint("MallocProbGuardMetadata", k_metadata_multiplier * zone->max_allocations);
+	uint32_t sample_rate = env_uint("MallocProbGuardSampleRate", choose_sample_rate());
 	// Approximate a (1 / sample_rate) chance for sampling; 1 means "always sample".
 	zone->sample_counter_range = (sample_rate != 1) ? (2 * sample_rate) : 1;
-	zone->signal_handler = env_bool("MallocPGuardSignalHandler");
-	zone->debug_log = env_bool("MallocPGuardDebugLog");
-	zone->debug_log_throttle_ms = env_uint("MallocPGuardDebugLogThrottleInMillis", 1000);
+	bool strict_alignment = env_var("MallocProbGuardStrictAlignment") ? env_bool("MallocProbGuardStrictAlignment") : FEATURE_FLAG(ProbGuardStrictAlignment, false);
+	zone->min_alignment = strict_alignment ? 1 : 16;  // Darwin ABI requires 16 byte alignment.
+	zone->signal_handler = env_bool("MallocProbGuardSignalHandler");
+	zone->debug = env_bool("MallocProbGuardDebug");
+	zone->debug_log_throttle_ms = env_uint("MallocProbGuardDebugLogThrottleInMillis", 1000);
 
-	if (zone->debug_log) {
+	if (zone->debug) {
 		malloc_report(ASL_LEVEL_INFO,
-				"PGuard: configuration: %u allocations, %u slots, %u metadata, 1/%u sample rate\n",
-				zone->max_allocations, zone->num_slots, zone->max_metadata, sample_rate);
+				"ProbGuard configuration: %u kB budget, 1/%u sample rate, %u/%u/%u allocations/metadata/slots, strict alignment: %d\n",
+				memory_budget_in_kb, sample_rate, zone->max_allocations, zone->max_metadata, zone->num_slots, strict_alignment);
+	}
+	if (!check_configuration(zone)) {
+		MALLOC_REPORT_FATAL_ERROR(0, "ProbGuard: bad configuration");
 	}
 }
 
@@ -1009,11 +1220,13 @@ configure_zone(pguard_zone_t *zone) {
 #define VM_PROT_READ_WRITE (VM_PROT_READ | VM_PROT_WRITE)
 
 static vm_address_t my_vm_map(size_t size, vm_prot_t protection, int tag);
+static void my_vm_map_fixed(vm_address_t addr, size_t size, vm_prot_t protection, int tag);
 static void my_vm_deallocate(vm_address_t addr, size_t size);
 static void my_vm_protect(vm_address_t addr, size_t size, vm_prot_t protection);
 
 static void
-setup_zone(pguard_zone_t *zone, malloc_zone_t *wrapped_zone) {
+setup_zone(pgm_zone_t *zone, malloc_zone_t *wrapped_zone)
+{
 	// Malloc zone
 	zone->malloc_zone = malloc_zone_template;
 	zone->wrapped_zone = wrapped_zone;
@@ -1023,12 +1236,15 @@ setup_zone(pguard_zone_t *zone, malloc_zone_t *wrapped_zone) {
 
 	// Quarantine
 	zone->size = quarantine_size(zone->num_slots);
-	zone->begin = my_vm_map(zone->size, VM_PROT_NONE, VM_MEMORY_MALLOC_PGUARD); // TODO(yln): place at "unusually high" address to minimize chance that a randomly corrupted pointers fall into the guarded range.
+	zone->region_size = 2 * k_zone_spacer + zone->size;
+	zone->region_begin = my_vm_map(zone->region_size, VM_PROT_NONE, VM_MEMORY_MALLOC);
+	zone->begin = zone->region_begin + k_zone_spacer;
 	zone->end = zone->begin + zone->size;
+	my_vm_map_fixed(zone->begin, zone->size, VM_PROT_NONE, VM_MEMORY_MALLOC_PROB_GUARD);
 
 	// Metadata
-	zone->slots = DELEGATE(malloc, zone->num_slots * sizeof(slot_t));
-	zone->metadata = DELEGATE(malloc, zone->max_metadata * sizeof(metadata_t));
+	zone->slots = DELEGATE(calloc, zone->num_slots, sizeof(slot_t));
+	zone->metadata = DELEGATE(calloc, zone->max_metadata, sizeof(metadata_t));
 	MALLOC_ASSERT(zone->slots && zone->metadata);
 
 	// Mutable state
@@ -1037,10 +1253,14 @@ setup_zone(pguard_zone_t *zone, malloc_zone_t *wrapped_zone) {
 
 static void install_signal_handler(void *unused);
 malloc_zone_t *
-pguard_create_zone(malloc_zone_t *wrapped_zone, unsigned debug_flags)
+pgm_create_zone(malloc_zone_t *wrapped_zone)
 {
-	// TODO(yln): debug_flags unused
-	pguard_zone_t *zone = (pguard_zone_t *)my_vm_map(sizeof(pguard_zone_t), VM_PROT_READ_WRITE, VM_MEMORY_MALLOC);
+	// rdar://74948496 ([PGM] Drop all requirements for wrapped_zone)
+	MALLOC_ASSERT(wrapped_zone->version >= 6);
+	MALLOC_ASSERT(wrapped_zone->batch_malloc && wrapped_zone->batch_free &&
+			wrapped_zone->memalign && wrapped_zone->free_definite_size);
+
+	pgm_zone_t *zone = (pgm_zone_t *)my_vm_map(sizeof(pgm_zone_t), VM_PROT_READ_WRITE, VM_MEMORY_MALLOC);
 	setup_zone(zone, wrapped_zone);
 	my_vm_protect((vm_address_t)zone, PAGE_MAX_SIZE, VM_PROT_READ);
 
@@ -1051,6 +1271,7 @@ pguard_create_zone(malloc_zone_t *wrapped_zone, unsigned debug_flags)
 
 	return (malloc_zone_t *)zone;
 }
+
 
 #pragma mark -
 #pragma mark Logging
@@ -1064,12 +1285,9 @@ to_millis(uint64_t mach_ticks)
 	return (mach_ticks * timebase.numer / timebase.denom) / nanos_per_ms;
 }
 
-static boolean_t
-should_log(pguard_zone_t *zone)
+static bool
+should_log(pgm_zone_t *zone)
 {
-	if (!zone->debug_log) {
-		return FALSE;
-	}
 	uint64_t now = mach_absolute_time();
 	uint64_t delta_ms = to_millis(now - zone->last_log_time);
 	boolean_t log = (delta_ms >= zone->debug_log_throttle_ms);
@@ -1080,13 +1298,18 @@ should_log(pguard_zone_t *zone)
 }
 
 static void
-log_zone_state(pguard_zone_t *zone, const char *type, vm_address_t addr)
+debug_zone(pgm_zone_t *zone, const char *label, vm_address_t addr)
 {
-	if (!should_log(zone)) {
+	if (!zone->debug) {
 		return;
 	}
-	malloc_report(ASL_LEVEL_INFO, "PGuard: %9s 0x%lx, fill state: %3u/%u\n",
-			type, addr,	zone->num_allocations, zone->max_allocations);
+	if (should_log(zone)) {
+		malloc_report(ASL_LEVEL_INFO, "ProbGuard: %9s 0x%lx, fill state: %3u/%u\n",
+				label, addr,	zone->num_allocations, zone->max_allocations);
+	}
+	if (!pgm_check(zone)) {
+		MALLOC_REPORT_FATAL_ERROR(addr, "ProbGuard: zone integrity check failed");
+	}
 }
 
 
@@ -1094,7 +1317,16 @@ log_zone_state(pguard_zone_t *zone, const char *type, vm_address_t addr)
 #pragma mark Fault Diagnosis
 
 static void
-fill_in_report(pguard_zone_t *zone, uint32_t slot, pguard_report_t *report)
+fill_in_trace(const alloc_info_t *info, const uint8_t *buffer, stack_trace_t *trace)
+{
+	trace->thread_id = info->thread_id;
+	trace->time = info->time;
+	uint32_t max_frames = sizeof(trace->frames) / sizeof(trace->frames[0]);
+	trace->num_frames = trace_decode(buffer, info->trace_size, trace->frames, max_frames);
+}
+
+static void
+fill_in_report(const pgm_zone_t *zone, uint32_t slot, pgm_report_t *report)
 {
 	slot_t *s = &zone->slots[slot];
 	metadata_t *m = &zone->metadata[s->metadata];
@@ -1106,18 +1338,21 @@ fill_in_report(pguard_zone_t *zone, uint32_t slot, pguard_report_t *report)
 
 	if (m->slot == slot) {
 		report->num_traces++;
-		memcpy(&report->alloc_trace, &m->alloc_trace, sizeof(stack_trace_t));
+		fill_in_trace(&m->alloc, m->trace_buffer, &report->alloc_trace);
 		if (s->state == ss_freed) {
 			report->num_traces++;
-			memcpy(&report->dealloc_trace, &m->dealloc_trace, sizeof(stack_trace_t));
+			uint8_t *buffer = &m->trace_buffer[m->alloc.trace_size];
+			fill_in_trace(&m->dealloc, buffer, &report->dealloc_trace);
 		}
 	}
 }
 
 static void
-diagnose_page_fault(pguard_zone_t *zone, vm_address_t fault_address, pguard_report_t *report)
+diagnose_page_fault(const pgm_zone_t *zone, vm_address_t fault_address, pgm_report_t *report)
 {
 	slot_lookup_t res = lookup_slot(zone, fault_address);
+	MALLOC_ASSERT(res.slot < zone->num_slots);
+	MALLOC_ASSERT(zone->slots[res.slot].metadata < zone->max_metadata);
 	slot_state_t ss = zone->slots[res.slot].state;
 
 	// We got here because of a page fault.
@@ -1171,20 +1406,23 @@ static const uint32_t k_buf_len = 1024;
 static void
 get_symbol_and_module_name(vm_address_t addr, char buf[k_buf_len])
 {
+	int success = 0;
 #if !TARGET_OS_DRIVERKIT
 	Dl_info info;
-	int success = dladdr((void *)addr, &info);
-	MALLOC_ASSERT(success);
-	snprintf(buf, k_buf_len, "%s  (%s)", info.dli_sname, info.dli_fname);
-#else
-	strcpy(buf, "?");
+	success = dladdr((void *)addr, &info);
+	if (success) {
+		snprintf(buf, k_buf_len, "%s  (%s)", info.dli_sname, info.dli_fname);
+	}
 #endif
+	if (!success) {
+		snprintf(buf, k_buf_len, "%p", (void *)addr);
+	}
 }
 
 static void
 print_trace(stack_trace_t *trace, const char *label)
 {
-	malloc_report(ASL_LEVEL_ERR, "%s trace (thread %llu):\n", label, trace->thread_id);
+	malloc_report(ASL_LEVEL_ERR, "%s trace (thread %llu, time: %llu):\n", label, trace->thread_id, trace->time);
 	for (uint32_t i = 0; i < trace->num_frames; i++) {
 		char sym_name[k_buf_len];
 		get_symbol_and_module_name(trace->frames[i], sym_name);
@@ -1194,9 +1432,9 @@ print_trace(stack_trace_t *trace, const char *label)
 }
 
 static void
-print_report(pguard_report_t *report)
+print_report(pgm_report_t *report)
 {
-	malloc_report(ASL_LEVEL_ERR, "PGuard: invalid access at 0x%lx\n",
+	malloc_report(ASL_LEVEL_ERR, "ProbGuard: invalid access at 0x%lx\n",
 			report->fault_address);
 	malloc_report(ASL_LEVEL_ERR, "Error type: %s (%s confidence)\n",
 			report->error_type, report->confidence);
@@ -1210,7 +1448,7 @@ print_report(pguard_report_t *report)
 		}
 	} else {
 		malloc_report(ASL_LEVEL_ERR, "Allocation stack traces not available.  "
-			"Try increasing `MallocPGuardMetadata` and rerun.\n");
+			"Try increasing `MallocProbGuardMetadata` and rerun.\n");
 	}
 }
 
@@ -1218,29 +1456,58 @@ print_report(pguard_report_t *report)
 #pragma mark -
 #pragma mark Crash Reporter API
 
+static kern_return_t
+diagnose_fault_from_external_process(vm_address_t fault_address, pgm_report_t *report,
+		task_t task, vm_address_t zone_address, memory_reader_t reader)
+{
+	READ_ZONE(zone, rt_slots_and_metadata);
+	diagnose_page_fault(zone, fault_address, report);
+	return KERN_SUCCESS;
+}
+
 static crash_reporter_memory_reader_t g_crm_reader;
+static const uint32_t k_max_read_memory = 3;
+static void *read_memory[k_max_read_memory];
+static uint32_t num_read_memory;
 static kern_return_t
 memory_reader_adapter(task_t task, vm_address_t address, vm_size_t size, void **local_memory)
 {
-	*local_memory = g_crm_reader(task, address, size);
-	return *local_memory ? KERN_SUCCESS : KERN_FAILURE;
+	MALLOC_ASSERT(num_read_memory < k_max_read_memory);
+	void *ptr = g_crm_reader(task, address, size);
+	*local_memory = ptr;
+	read_memory[num_read_memory++] = ptr;
+	return ptr ? KERN_SUCCESS : KERN_FAILURE;
 }
 
+static memory_reader_t *
+setup_memory_reader(crash_reporter_memory_reader_t crm_reader)
+{
+	g_crm_reader = crm_reader;
+	num_read_memory = 0;
+	return memory_reader_adapter;
+}
+
+static void
+free_read_memory()
+{
+	for (uint32_t i = 0; i < num_read_memory; i++) {
+		free(read_memory[i]);
+	}
+}
+
+static _malloc_lock_s crash_reporter_lock = _MALLOC_LOCK_INIT;
 kern_return_t
 pgm_diagnose_fault_from_crash_reporter(vm_address_t fault_address, pgm_report_t *report,
 		task_t task, vm_address_t zone_address, crash_reporter_memory_reader_t crm_reader)
 {
-	g_crm_reader = crm_reader;
+	_malloc_lock_lock(&crash_reporter_lock);
 
-	memory_reader_t *reader = memory_reader_adapter;
-	READ_ZONE(zone, rt_slots_and_metadata);
+	memory_reader_t *reader = setup_memory_reader(crm_reader);
+	kern_return_t kr = diagnose_fault_from_external_process(fault_address, report, task, zone_address, reader);
+	free_read_memory();
 
-	diagnose_page_fault(zone, fault_address, report);
-	free(zone->metadata);
-	free(zone->slots);
-	// zone lives on the stack
-
-	return KERN_SUCCESS;
+	_malloc_lock_unlock(&crash_reporter_lock);
+	return kr;
 }
 
 
@@ -1251,15 +1518,14 @@ extern malloc_zone_t **malloc_zones;
 static void
 report_error_from_signal_handler(vm_address_t fault_address)
 {
-	// TODO(yln): maybe look up by name, once the zone naming has been figured out.
-	pguard_zone_t *zone = (pguard_zone_t *)malloc_zones[0];
-	MALLOC_ASSERT(zone->malloc_zone.size == FN_PTR(pguard_size));
+	pgm_zone_t *zone = (pgm_zone_t *)malloc_zones[0];
+	MALLOC_ASSERT(zone->malloc_zone.size == FN_PTR(pgm_size));
 
 	if (!is_guarded(zone, fault_address)) {
 		return;
 	}
 
-	pguard_report_t report;
+	pgm_report_t report;
 	{
 		trylock(zone); // Best-effort locking to avoid deadlock.
 		diagnose_page_fault(zone, fault_address, &report);
@@ -1267,7 +1533,7 @@ report_error_from_signal_handler(vm_address_t fault_address)
 	}
 	print_report(&report);
 
-	MALLOC_REPORT_FATAL_ERROR(fault_address, "PGuard: invalid access detected");
+	MALLOC_REPORT_FATAL_ERROR(fault_address, "ProbGuard: invalid access detected");
 }
 
 static struct sigaction prev_sigaction;
@@ -1307,7 +1573,7 @@ install_signal_handler(void *unused)
 #pragma mark -
 #pragma mark Mockable Helpers
 
-#ifndef PGUARD_MOCK_RANDOM
+#ifndef PGM_MOCK_RANDOM
 static uint32_t
 rand_uniform(uint32_t upper_bound)
 {
@@ -1316,26 +1582,16 @@ rand_uniform(uint32_t upper_bound)
 }
 #endif
 
-#ifndef PGUARD_MOCK_CAPTURE_TRACE
+#ifndef PGM_MOCK_TRACE_COLLECT
 MALLOC_ALWAYS_INLINE
-static inline void
-capture_trace(stack_trace_t *trace)
+static inline size_t
+my_trace_collect(uint8_t *buffer, size_t size)
 {
-	// Frame 0 is thread_stack_pcs() itself; last frame usually is a garbage value.
-	const uint32_t dropped_frames = 2;
-	const uint32_t max_frames = k_pguard_trace_max_frames + dropped_frames;
-	vm_address_t frames[max_frames];
-	uint32_t num_frames;
-	thread_stack_pcs(frames, max_frames, &num_frames);
-	num_frames = (num_frames > dropped_frames) ? (num_frames - dropped_frames) : 0;
-
-	trace->thread_id = _pthread_threadid_self_np_direct();
-	trace->num_frames = num_frames;
-	memcpy(trace->frames, &frames[1], num_frames * sizeof(vm_address_t));
+	return trace_collect(buffer, size);
 }
 #endif
 
-#ifndef PGUARD_MOCK_PAGE_ACCESS
+#ifndef PGM_MOCK_PAGE_ACCESS
 static void
 mark_inaccessible(vm_address_t page)
 {
@@ -1356,15 +1612,14 @@ mark_read_write(vm_address_t page)
 #pragma mark -
 #pragma mark Mach VM Helpers
 
-// TODO(yln): try to replace these helpers with functions from vm.c
 static vm_address_t
-my_vm_map(size_t size, vm_prot_t protection, int tag)
+my_vm_map_common(vm_address_t addr, size_t size, vm_prot_t protection, int vm_flags, int tag)
 {
 	vm_map_t target = mach_task_self();
-	mach_vm_address_t address = 0;
+	mach_vm_address_t address = addr;
 	mach_vm_size_t size_rounded = round_page(size);
 	mach_vm_offset_t mask = 0x0;
-	int flags = VM_FLAGS_ANYWHERE | VM_MAKE_TAG(tag);
+	int flags = vm_flags | VM_MAKE_TAG(tag);
 	mem_entry_name_port_t object = MEMORY_OBJECT_NULL;
 	memory_object_offset_t offset = 0;
 	boolean_t copy = FALSE;
@@ -1376,6 +1631,20 @@ my_vm_map(size_t size, vm_prot_t protection, int tag)
 		object, offset, copy, cur_protection, max_protection, inheritance);
 	MALLOC_ASSERT(kr == KERN_SUCCESS);
 	return address;
+}
+
+static vm_address_t
+my_vm_map(size_t size, vm_prot_t protection, int tag)
+{
+	return my_vm_map_common(0, size, protection, VM_FLAGS_ANYWHERE, tag);
+}
+
+static void
+my_vm_map_fixed(vm_address_t addr, size_t size, vm_prot_t protection, int tag)
+{
+	int flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
+	vm_address_t addr2 = my_vm_map_common(addr, size, protection, flags, tag);
+	MALLOC_ASSERT(addr2 == addr);
 }
 
 static void

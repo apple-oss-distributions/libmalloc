@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -21,26 +21,19 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef __NANO_MALLOC_H
-#define __NANO_MALLOC_H
+#ifndef _PGM_MALLOC_H_
+#define _PGM_MALLOC_H_
 
-// Forward decl for the nanozone.
-typedef struct nanozone_s nanozone_t;
+#include "base.h"
+#include "malloc/malloc.h"
+#include <stdbool.h>
+
+MALLOC_NOEXPORT
+bool
+pgm_should_enable(bool internal_build);
 
 MALLOC_NOEXPORT
 malloc_zone_t *
-nano_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags);
+pgm_create_zone(malloc_zone_t *wrapped_zone);
 
-MALLOC_NOEXPORT
-void
-nano_forked_zone(nanozone_t *nanozone);
-
-MALLOC_NOEXPORT
-void
-nano_init(const char *envp[], const char *apple[], const char *bootargs);
-
-MALLOC_NOEXPORT
-void
-nano_configure(void);
-
-#endif // __NANO_MALLOC_H
+#endif // _PGM_MALLOC_H_

@@ -21,18 +21,20 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef _PGUARD_MALLOC_H_
-#define _PGUARD_MALLOC_H_
+#ifndef _STACK_TRACE_H_
+#define _STACK_TRACE_H_
 
 #include "base.h"
-#include "malloc/malloc.h"
+
+#include <mach/vm_types.h>
+#include <stddef.h>
+
+MALLOC_NOEXPORT MALLOC_NOINLINE
+size_t
+trace_collect(uint8_t *buffer, size_t size);
 
 MALLOC_NOEXPORT
-boolean_t
-pguard_enabled(void);
+uint32_t
+trace_decode(const uint8_t *buffer, size_t size, vm_address_t *addrs, uint32_t num_addrs);
 
-MALLOC_NOEXPORT
-malloc_zone_t *
-pguard_create_zone(malloc_zone_t *wrapped_zone, unsigned debug_flags);
-
-#endif // _PGUARD_MALLOC_H_
+#endif // _STACK_TRACE_H_

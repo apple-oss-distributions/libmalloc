@@ -30,6 +30,7 @@ WARNING_CFLAGS := -Wno-format-invalid-specifier -Wno-format-extra-args
 OTHER_CFLAGS += \
 	-DDARWINTEST \
 	-DOS_UNFAIR_LOCK_INLINE=1 \
+	-fno-builtin \
 	-lCrashReporterClient \
 	-I$(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders \
 	-I$(SRCROOT)/../private \
@@ -59,6 +60,8 @@ include MallocBenchTest/Makefile.dummy
 BATS_PLISTS = $(BATS_PLISTS_EXTRACT)
 endif
 
+BATS_PLISTS += $(PROJECT_DIR)/tests/xctests/BATS.plist
+
 $(BATS_PLISTS_EXTRACT): %.plist : %
 	$(EXTRACTMETA) extract -i /$(INSTALLPATH)/$(notdir $<) -b $(SYMROOT)/$(notdir $<) -o $@
 	@plutil -convert binary1 $@
@@ -71,7 +74,7 @@ ifeq ($(Embedded),NO)
 tsan: CFLAGS := $(filter-out $(ARCH_FLAGS),$(CFLAGS)) -arch x86_64 -fsanitize=thread
 tsan: OTHER_LDFLAGS += -Wl,-rpath -Wl,$(SANITIZER_DYLIB_PATH)
 else
-EXCLUDED_SOURCES += tsan.c
+EXCLUDED_SOURCES += tsan.c magazine_medium_test.c
 endif
 
 madvise: OTHER_CFLAGS += -I../src

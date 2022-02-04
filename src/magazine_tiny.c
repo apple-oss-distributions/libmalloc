@@ -44,13 +44,13 @@ tiny_mag_get_thread_index(void)
 {
 #if CONFIG_TINY_USES_HYPER_SHIFT
 	if (os_likely(_os_cpu_number_override == -1)) {
-		return _os_cpu_number() >> hyper_shift;
+		return _malloc_cpu_number() >> hyper_shift;
 	} else {
 		return _os_cpu_number_override >> hyper_shift;
 	}
 #else // CONFIG_SMALL_USES_HYPER_SHIFT
 	if (os_likely(_os_cpu_number_override == -1)) {
-		return _os_cpu_number();
+		return _malloc_cpu_number();
 	} else {
 		return _os_cpu_number_override;
 	}
@@ -81,7 +81,11 @@ get_tiny_previous_free_msize(const void *ptr)
 		if (BITARRAY_BIT(prev_header, prev_index)) {
 			return 1;
 		}
-		return TINY_PREVIOUS_MSIZE(ptr);
+		msize_t *prev_msize_ptr = &TINY_PREVIOUS_MSIZE(ptr);
+		// This is a speculative read of potentially in-use app memory, we need
+		// to use _malloc_read_uint16_via_rsp to avoid triggering warnings in
+		// memory diagnostic tools.
+		return _malloc_read_uint16_via_rsp(prev_msize_ptr);
 	}
 	// don't read possibly unmapped memory before the beginning of the region
 	return 0;
@@ -836,18 +840,30 @@ tiny_madvise_pressure_relief(rack_t *rack)
 	for (mag_index = 0; mag_index < rack->num_magazines; mag_index++) {
 		size_t index;
 		for (index = 0; index < rack->region_generation->num_regions_allocated; ++index) {
-			SZONE_LOCK(TINY_SZONE_FROM_RACK(rack));
+			rack_region_lock(rack);
 
 			region_t tiny = rack->region_generation->hashed_regions[index];
 			if (!tiny || tiny == HASHRING_REGION_DEALLOCATED) {
-				SZONE_UNLOCK(TINY_SZONE_FROM_RACK(rack));
+				rack_region_unlock(rack);
 				continue;
 			}
 
+			region_trailer_t *trailer = REGION_TRAILER_FOR_TINY_REGION(tiny);
+			// Make sure that the owning magazine doesn't try and take this out
+			// from under our feet.
+			trailer->dispose_flags |= RACK_DISPOSE_DELAY;
+			rack_region_unlock(rack);
+
 			magazine_t *mag_ptr = mag_lock_zine_for_region_trailer(rack->magazines,
-					REGION_TRAILER_FOR_TINY_REGION(tiny),
-					MAGAZINE_INDEX_FOR_TINY_REGION(tiny));
-			SZONE_UNLOCK(TINY_SZONE_FROM_RACK(rack));
+					trailer, MAGAZINE_INDEX_FOR_TINY_REGION(tiny));
+
+			// If acquiring the region lock was enough to prevent the owning
+			// magazine from deallocating the region, free it now so we don't
+			// do wasted work.
+			if (rack_region_maybe_dispose(rack, tiny, TINY_REGION_SIZE, trailer)) {
+				SZONE_MAGAZINE_PTR_UNLOCK(mag_ptr);
+				continue;
+			}
 
 			/* Ordering is important here, the magazine of a region may potentially change
 			 * during mag_lock_zine_for_region_trailer, so src_mag_index must be taken
@@ -857,6 +873,11 @@ tiny_madvise_pressure_relief(rack_t *rack)
 
 			/* We can (and must) ignore magazines that are already in the recirc depot. */
 			if (src_mag_index == DEPOT_MAGAZINE_INDEX) {
+				SZONE_MAGAZINE_PTR_UNLOCK(mag_ptr);
+				continue;
+			}
+
+			if (REGION_TRAILER_FOR_TINY_REGION(tiny)->pinned_to_depot > 0) {
 				SZONE_MAGAZINE_PTR_UNLOCK(mag_ptr);
 				continue;
 			}
@@ -875,7 +896,7 @@ tiny_madvise_pressure_relief(rack_t *rack)
 
 			SZONE_MAGAZINE_PTR_LOCK(tiny_depot_ptr);
 			MAGAZINE_INDEX_FOR_TINY_REGION(tiny) = DEPOT_MAGAZINE_INDEX;
-			REGION_TRAILER_FOR_TINY_REGION(tiny)->pinned_to_depot = 0;
+			MALLOC_ASSERT(REGION_TRAILER_FOR_TINY_REGION(tiny)->pinned_to_depot == 0);
 
 			size_t bytes_inplay = tiny_free_reattach_region(rack, tiny_depot_ptr, tiny);
 
@@ -981,22 +1002,32 @@ tiny_get_region_from_depot(rack_t *rack, magazine_t *tiny_mag_ptr, mag_index_t m
 	// Appropriate a Depot'd region that can satisfy requested msize.
 	region_trailer_t *node;
 	region_t sparse_region;
+	msize_t try_msize = msize;
 
 	while (1) {
-		sparse_region = tiny_find_msize_region(rack, depot_ptr, DEPOT_MAGAZINE_INDEX, msize);
+		sparse_region = tiny_find_msize_region(rack, depot_ptr, DEPOT_MAGAZINE_INDEX, try_msize);
 		if (NULL == sparse_region) { // Depot empty?
 			SZONE_MAGAZINE_PTR_UNLOCK(depot_ptr);
 			return 0;
 		}
 
 		node = REGION_TRAILER_FOR_TINY_REGION(sparse_region);
-		if (0 >= node->pinned_to_depot) {
+		if (0 == node->pinned_to_depot) {
+			// Found one!
 			break;
 		}
 
-		SZONE_MAGAZINE_PTR_UNLOCK(depot_ptr);
-		yield();
-		SZONE_MAGAZINE_PTR_LOCK(depot_ptr);
+		// Try the next msize up - maybe the head of its free list will be in
+		// a region we can use. Once we get the region we'll still allocate the
+		// original msize.
+		try_msize++;
+
+		if (try_msize > NUM_TINY_SLOTS) {
+			// Tried all the msizes but couldn't get a usable region. Let's
+			// give up for now and we'll allocate a new region from the kernel.
+			SZONE_MAGAZINE_PTR_UNLOCK(depot_ptr);
+			return 0;
+		}
 	}
 
 	// disconnect node from Depot
@@ -1007,7 +1038,7 @@ tiny_get_region_from_depot(rack_t *rack, magazine_t *tiny_mag_ptr, mag_index_t m
 
 	// Transfer ownership of the region
 	MAGAZINE_INDEX_FOR_TINY_REGION(sparse_region) = mag_index;
-	node->pinned_to_depot = 0;
+	MALLOC_ASSERT(node->pinned_to_depot == 0);
 
 	// Iterate the region putting its free entries on its new (locked) magazine's free list
 	size_t bytes_inplay = tiny_free_reattach_region(rack, tiny_mag_ptr, sparse_region);
@@ -1049,32 +1080,19 @@ tiny_free_try_depot_unmap_no_lock(rack_t *rack, magazine_t *depot_ptr, region_tr
 	int objects_in_use = tiny_free_detach_region(rack, depot_ptr, sparse_region);
 
 	if (0 == objects_in_use) {
-		// Invalidate the hash table entry for this region with HASHRING_REGION_DEALLOCATED.
-		// Using HASHRING_REGION_DEALLOCATED preserves the collision chain, using HASHRING_OPEN_ENTRY (0) would not.
-		rgnhdl_t pSlot = hash_lookup_region_no_lock(rack->region_generation->hashed_regions,
-				rack->region_generation->num_regions_allocated,
-				rack->region_generation->num_regions_allocated_shift,
-				sparse_region);
-
-		if (NULL == pSlot) {
-			malloc_zone_error(rack->debug_flags, true, "tiny_free_try_depot_unmap_no_lock hash lookup failed: %p\n", sparse_region);
+		if (!rack_region_remove(rack, sparse_region, node)) {
 			return NULL;
 		}
-		*pSlot = HASHRING_REGION_DEALLOCATED;
 		depot_ptr->num_bytes_in_magazine -= TINY_HEAP_SIZE;
 
-		// Atomically increment num_regions_dealloc
-#ifdef __LP64___
-		OSAtomicIncrement64(&rack->num_regions_dealloc);
-#else
-		OSAtomicIncrement32((int32_t *)&rack->num_regions_dealloc);
-#endif
-
 		// Caller will transfer ownership of the region back to the OS with no locks held
-		MAGMALLOC_DEALLOCREGION(TINY_SZONE_FROM_RACK(rack), (void *)sparse_region, TINY_REGION_SIZE); // DTrace USDT Probe
+		MAGMALLOC_DEALLOCREGION(TINY_SZONE_FROM_RACK(rack),
+				(void *)sparse_region, TINY_REGION_SIZE); // DTrace USDT Probe
 		return sparse_region;
 	} else {
-		malloc_zone_error(rack->debug_flags, true, "tiny_free_try_depot_unmap_no_lock objects_in_use not zero: %d\n", objects_in_use);
+		malloc_zone_error(rack->debug_flags, true,
+				"tiny_free_try_depot_unmap_no_lock objects_in_use not zero: %d\n",
+				objects_in_use);
 		return NULL;
 	}
 }

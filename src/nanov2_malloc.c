@@ -596,15 +596,15 @@ nanov2_get_allocation_block_index(void)
 #if CONFIG_NANO_USES_HYPER_SHIFT
 	if (os_likely(nano_common_max_magazines_is_ncpu)) {
 		// Default case is max magazines == physical number of CPUs, which
-		// must be > _os_cpu_number() >> hyper_shift, so the modulo
+		// must be > _malloc_cpu_number() >> hyper_shift, so the modulo
 		// operation is not required.
-		return _os_cpu_number() >> hyper_shift;
+		return _malloc_cpu_number() >> hyper_shift;
 	}
 #else // CONFIG_NANO_USES_HYPER_SHIFT
 	if (os_likely(nano_common_max_magazines_is_ncpu)) {
 		// Default case is max magazines == logical number of CPUs, which
-		// must be > _os_cpu_number() so the modulo operation is not required.
-		return _os_cpu_number();
+		// must be > _malloc_cpu_number() so the modulo operation is not required.
+		return _malloc_cpu_number();
 	}
 #endif // CONFIG_NANO_USES_HYPER_SHIFT
 
@@ -614,7 +614,7 @@ nanov2_get_allocation_block_index(void)
 #endif // CONFIG_NANO_USES_HYPER_SHIFT
 
 	if (os_likely(_os_cpu_number_override == -1)) {
-		return (_os_cpu_number() >> shift) % nano_common_max_magazines;
+		return (_malloc_cpu_number() >> shift) % nano_common_max_magazines;
 	}
 	return (_os_cpu_number_override >> shift) % nano_common_max_magazines;
 }
@@ -1334,7 +1334,7 @@ nanov2_ptr_in_use_enumerator(task_t task, void *context, unsigned type_mask,
 	if (kr) {
 		return kr;
 	}
-	boolean_t self_zone = (nanozonev2_t *)zone_address == nanozone;
+	boolean_t self_zone = mach_task_is_self(task) && (nanozonev2_t *)zone_address == nanozone;
 	memcpy(&zone_copy, nanozone, sizeof(zone_copy));
 	nanozone = &zone_copy;
 	nanov2_meta_index_t metablock_meta_index = nanov2_metablock_meta_index(nanozone);
@@ -1486,7 +1486,7 @@ nanov2_good_size(nanozonev2_t *nanozone, size_t size)
 static boolean_t
 nanov2_check(nanozonev2_t *nanozone)
 {
-	// Does nothing, just like Nano V1.
+	// Does nothing
 	return 1;
 }
 
@@ -1722,7 +1722,7 @@ nanov2_print_task(task_t task, unsigned level, vm_address_t zone_address,
 static void
 nanov2_log(malloc_zone_t *zone, void *log_address)
 {
-	// Does nothing, just like Nano V1.
+	// Does nothing
 }
 
 static void
