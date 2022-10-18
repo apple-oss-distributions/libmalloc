@@ -833,8 +833,8 @@ small_free_scan_madvise_free(rack_t *rack, magazine_t *depot_ptr, region_t r)
 		OSAtomicIncrement32Barrier(&(REGION_TRAILER_FOR_SMALL_REGION(r)->pinned_to_depot));
 		SZONE_MAGAZINE_PTR_UNLOCK(depot_ptr);
 		for (i = 0; i < advisories; ++i) {
-			uintptr_t addr = (advisory[i].pnum << vm_page_quanta_shift) + (uintptr_t)r;
-			size_t size = advisory[i].size << vm_page_quanta_shift;
+			uintptr_t addr = (advisory[i].pnum << vm_kernel_page_shift) + (uintptr_t)r;
+			size_t size = advisory[i].size << vm_kernel_page_shift;
 
 			mvm_madvise_free(rack, r, addr, addr + size, NULL, rack->debug_flags & MALLOC_DO_SCRIBBLE);
 		}
@@ -915,11 +915,6 @@ static boolean_t
 small_get_region_from_depot(rack_t *rack, magazine_t *small_mag_ptr, mag_index_t mag_index, msize_t msize)
 {
 	magazine_t *depot_ptr = &(rack->magazines[DEPOT_MAGAZINE_INDEX]);
-
-	/* FIXME: Would Uniprocessor benefit from recirc and MADV_FREE? */
-	if (rack->num_magazines == 1) { // Uniprocessor, single magazine, so no recirculation necessary
-		return 0;
-	}
 
 #if DEBUG_MALLOC
 	if (DEPOT_MAGAZINE_INDEX == mag_index) {
@@ -1277,11 +1272,7 @@ small_free_try_recirc_to_depot(rack_t *rack,
 	region_trailer_t *node = REGION_TRAILER_FOR_SMALL_REGION(region);
 	size_t bytes_used = node->bytes_used;
 
-	/* FIXME: Would Uniprocessor benefit from recirc and MADV_FREE? */
-	if (rack->num_magazines == 1) { // Uniprocessor, single magazine, so no recirculation necessary
-		/* NOTHING */
-		return TRUE; // Caller must do SZONE_MAGAZINE_PTR_UNLOCK(tiny_mag_ptr)
-	} else if (DEPOT_MAGAZINE_INDEX != mag_index) {
+	if (DEPOT_MAGAZINE_INDEX != mag_index) {
 		// Emptiness discriminant
 		if (small_region_below_recirc_threshold(region)) {
 			/* Region has crossed threshold from density to sparsity. Mark it "suitable" on the

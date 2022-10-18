@@ -60,7 +60,16 @@ T_DECL(small_mem_pressure, "small memory pressure thread",
 #if TARGET_OS_WATCH
 		T_META_TIMEOUT(TEST_TIMEOUT),
 #endif // TARGET_OS_WATCH
+#if TARGET_OS_OSX
+		T_META_ALL_VALID_ARCHS(true), // test Rosetta
+		// darwintest multi-arch support relies on the first line of stderr
+		// being reserved for arch(1) complaining about a given slice being
+		// unsupported, so we can only put the malloc debug reporting on stderr
+		// when we don't need that
+		T_META_ENVVAR("MallocDebugReport=none"),
+#else // TARGET_OS_OSX
 		T_META_ENVVAR("MallocDebugReport=stderr"),
+#endif // TARGET_OS_OSX
 		T_META_ENVVAR("MallocScribble=1"),
 		T_META_ENVVAR("MallocSpaceEfficient=1"),
 		T_META_ENVVAR("MallocMaxMagazines=1"),
@@ -77,6 +86,12 @@ T_DECL(small_mem_pressure, "small memory pressure thread",
 	T_PASS("didn't crash");
 }
 
+// Disabled until rdar://83904507 is fixed
+//
+// Need to compile the test out entirely because T_META_MAYFAIL doesn't handle
+// test crashes - rdar://86164532
+#if 0
+
 T_DECL(medium_mem_pressure, "medium memory pressure thread",
 #if TARGET_OS_WATCH
 		T_META_TIMEOUT(TEST_TIMEOUT),
@@ -85,6 +100,7 @@ T_DECL(medium_mem_pressure, "medium memory pressure thread",
 		T_META_ENVVAR("MallocScribble=1"),
 		T_META_ENVVAR("MallocSpaceEfficient=1"),
 		T_META_ENVVAR("MallocMaxMagazines=1"),
+		T_META_MAYFAIL("Disabled until rdar://83904507 is fixed"),
 		T_META_CHECK_LEAKS(false))
 {
 	dispatch_queue_t q = dispatch_queue_create("pressure queue", 0); // serial
@@ -97,6 +113,8 @@ T_DECL(medium_mem_pressure, "medium memory pressure thread",
 	stress(64*1024, 1000);
 	T_PASS("didn't crash");
 }
+
+#endif
 
 T_DECL(tiny_mem_pressure_multi, "test memory pressure in tiny on threads",
 #if TARGET_OS_WATCH

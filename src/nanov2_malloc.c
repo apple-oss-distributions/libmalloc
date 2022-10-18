@@ -41,19 +41,39 @@ nanov2_statistics_task(task_t task, vm_address_t zone_address,
 #pragma mark -
 #pragma mark Externals for resolved functions
 
-MALLOC_NOEXPORT extern void *nanov2_allocate(nanozonev2_t *nanozone, size_t rounded_size,
-		boolean_t clear);
-MALLOC_NOEXPORT extern void nanov2_free_to_block(nanozonev2_t *nanozone, void *ptr,
-		nanov2_size_class_t size_class);
-MALLOC_NOEXPORT extern boolean_t nanov2_madvise_block(nanozonev2_t *nanozone,
-		nanov2_block_meta_t *block_metap, nanov2_block_t *blockp,
-		nanov2_size_class_t size_class);
 MALLOC_NOEXPORT extern size_t nanov2_pointer_size(nanozonev2_t *nanozone, void *ptr,
 		boolean_t allow_inner);
 MALLOC_NOEXPORT extern size_t nanov2_pressure_relief(nanozonev2_t *nanozone, size_t goal);
 
 #if OS_VARIANT_RESOLVED
-MALLOC_NOEXPORT extern boolean_t nanov2_allocate_new_region(nanozonev2_t *nanozone);
+MALLOC_ALWAYS_INLINE MALLOC_INLINE size_t
+nanov2_pointer_size_inline(nanozonev2_t *nanozone, void *ptr, boolean_t allow_inner,
+		nanov2_size_class_t *size_class_out, nanov2_block_meta_t **block_metap_out);
+
+MALLOC_ALWAYS_INLINE MALLOC_INLINE void *
+nanov2_allocate_from_block_inline(nanozonev2_t *nanozone,
+		nanov2_block_meta_t *block_metap, nanov2_size_class_t size_class,
+		nanov2_block_meta_t **madvise_block_metapp_out, bool *corruption);
+
+static void *
+nanov2_allocate_outlined(nanozonev2_t *nanozone,
+		nanov2_block_meta_t **block_metapp, size_t rounded_size,
+		nanov2_size_class_t size_class, int allocation_index,
+		nanov2_block_meta_t *madvise_block_metap, void *corrupt_slot,
+		bool clear);
+
+MALLOC_ALWAYS_INLINE MALLOC_INLINE nanov2_block_meta_t *
+nanov2_free_to_block_inline(nanozonev2_t *nanozone, void *ptr,
+		nanov2_size_class_t size_class, nanov2_block_meta_t *block_metap);
+
+static boolean_t nanov2_madvise_block_locked(
+		nanozonev2_t *nanozone, nanov2_block_meta_t *block_metap,
+		nanov2_block_t *blockp, nanov2_size_class_t size_class, uint32_t expected_state);
+static void nanov2_madvise_block(nanozonev2_t *nanozone,
+		nanov2_block_meta_t *block_metap, nanov2_size_class_t size_class,
+		uint32_t expected_state);
+
+MALLOC_NOEXPORT extern nanov2_arena_t *nanov2_allocate_new_region(nanozonev2_t *nanozone);
 #endif // OS_VARIANT_RESOLVED
 
 #pragma mark -
@@ -313,7 +333,6 @@ nanov2_arena_address_for_ptr(void *ptr)
 	return (void *)(((uintptr_t)ptr) & NANOV2_ARENA_ADDRESS_MASK);
 }
 
-#if OS_VARIANT_RESOLVED
 // Given a pointer that is assumed to be in the Nano zone, returns the address
 // of its containing region. Works for both real and logical pointers.
 static MALLOC_ALWAYS_INLINE MALLOC_INLINE nanov2_region_t *
@@ -321,7 +340,6 @@ nanov2_region_address_for_ptr(void *ptr)
 {
 	return (nanov2_region_t *)(((uintptr_t)ptr) & NANOV2_REGION_ADDRESS_MASK);
 }
-#endif // OS_VARIANT_RESOLVED
 
 // Given a pointer that is assumed to be in the Nano zone, returns the real
 // address of its metadata block. Works for both real and logical pointers.
@@ -395,15 +413,40 @@ nanov2_first_arena_for_region(nanov2_region_t *region)
 	return (nanov2_arena_t *)region;
 }
 
+#if OS_VARIANT_RESOLVED
+// Given an atomically-observed current_region_next_arena pointer, returns
+// whether or not it's a usable arena or a limit arena (indicating exhaustion of
+// the current region).
+static MALLOC_ALWAYS_INLINE MALLOC_INLINE bool
+nanov2_current_region_next_arena_is_limit(
+		nanov2_arena_t *current_region_next_arena)
+{
+	// The first arena of a region is never stored in current_region_next_arena,
+	// so a value at the beginning of a region must be a limit arena.
+	return current_region_next_arena == (nanov2_arena_t *)(
+			nanov2_region_address_for_ptr(current_region_next_arena));
+}
+#endif // OS_VARIANT_RESOLVED
+
+// Given an atomically-observed current_region_next_arena pointer, returns the
+// base of the current region at the time of the observation.
+static MALLOC_ALWAYS_INLINE MALLOC_INLINE nanov2_region_t *
+nanov2_current_region_base(nanov2_arena_t *current_region_next_arena)
+{
+	return nanov2_region_address_for_ptr(
+			(void *)(((uintptr_t)current_region_next_arena) - 1));
+}
+
 // Given a region pointer, returns a pointer to the arena after the last
 // active arena in the region.
 static MALLOC_ALWAYS_INLINE MALLOC_INLINE nanov2_arena_t *
-nanov2_limit_arena_for_region(nanozonev2_t *nanozone, nanov2_region_t *region)
+nanov2_limit_arena_for_region(nanozonev2_t __unused *nanozone,
+		nanov2_region_t *region, nanov2_arena_t *current_region_next_arena)
 {
 	// The first arena is colocated with the region itself.
 	nanov2_arena_t *limit_arena;
-	if (region == nanozone->current_region_base) {
-		limit_arena = nanozone->current_region_next_arena;
+	if (region == nanov2_current_region_base(current_region_next_arena)) {
+		limit_arena = current_region_next_arena;
 	} else {
 		limit_arena = nanov2_first_arena_for_region(region + 1);
 	}
@@ -424,14 +467,23 @@ nanov2_region_linkage_for_region(nanozonev2_t *nanozone, nanov2_region_t *region
 
 #if OS_VARIANT_RESOLVED
 // Given a pointer to a region, returns a pointer to the region that follows it,
-// or NULL if there isn't one.
+// or NULL if there isn't one. We may observe linkage to a new region that
+// hasn't yet actually been installed into current_region_next_arena; ignore the
+// linkage in this case.
 static MALLOC_ALWAYS_INLINE MALLOC_INLINE nanov2_region_t *
-nanov2_next_region_for_region(nanozonev2_t *nanozone, nanov2_region_t *region)
+nanov2_next_region_for_region(nanozonev2_t *nanozone, nanov2_region_t *region,
+		nanov2_arena_t *current_region_next_arena)
 {
 	nanov2_region_linkage_t *linkage =
 			nanov2_region_linkage_for_region(nanozone, region);
-	int offset = linkage->next_region_offset;
-	return offset ? region + offset : NULL;
+	int offset = os_atomic_load(&linkage->next_region_offset, relaxed);
+	if (!offset) {
+		return NULL;
+	}
+
+	nanov2_region_t *next_region = region + offset;
+	return (nanov2_arena_t *)next_region < current_region_next_arena ?
+			next_region : NULL;
 }
 #endif // OS_VARIANT_RESOLVED
 
@@ -441,14 +493,21 @@ nanov2_next_region_for_region(nanozonev2_t *nanozone, nanov2_region_t *region)
 // for another process.
 static MALLOC_ALWAYS_INLINE MALLOC_INLINE nanov2_region_t *
 nanov2_next_region_for_region_offset(nanozonev2_t *nanozone,
-        nanov2_region_t *region, off_t region_offset)
+		nanov2_region_t *region, off_t region_offset,
+		nanov2_arena_t *current_region_next_arena)
 {
-    nanov2_region_linkage_t *linkage =
-            nanov2_region_linkage_for_region(nanozone, region);
-    nanov2_region_linkage_t *mapped_linkage = (nanov2_region_linkage_t *)
-        ((uintptr_t)linkage + region_offset);
-    int offset = mapped_linkage->next_region_offset;
-    return offset ? region + offset : NULL;
+	nanov2_region_linkage_t *linkage =
+			nanov2_region_linkage_for_region(nanozone, region);
+	nanov2_region_linkage_t *mapped_linkage = (nanov2_region_linkage_t *)(
+			((uintptr_t)linkage + region_offset));
+	int offset = os_atomic_load(&mapped_linkage->next_region_offset, relaxed);
+	if (!offset) {
+		return NULL;
+	}
+
+	nanov2_region_t *next_region = region + offset;
+	return (nanov2_arena_t *)next_region < current_region_next_arena ?
+			next_region : NULL;
 }
 #endif // OS_VARIANT_NOTRESOLVED
 
@@ -598,13 +657,13 @@ nanov2_get_allocation_block_index(void)
 		// Default case is max magazines == physical number of CPUs, which
 		// must be > _malloc_cpu_number() >> hyper_shift, so the modulo
 		// operation is not required.
-		return _malloc_cpu_number() >> hyper_shift;
+		return (_malloc_cpu_number() >> hyper_shift) & MAX_CURRENT_BLOCKS_MASK;
 	}
 #else // CONFIG_NANO_USES_HYPER_SHIFT
 	if (os_likely(nano_common_max_magazines_is_ncpu)) {
 		// Default case is max magazines == logical number of CPUs, which
 		// must be > _malloc_cpu_number() so the modulo operation is not required.
-		return _malloc_cpu_number();
+		return _malloc_cpu_number() & MAX_CURRENT_BLOCKS_MASK;
 	}
 #endif // CONFIG_NANO_USES_HYPER_SHIFT
 
@@ -614,9 +673,11 @@ nanov2_get_allocation_block_index(void)
 #endif // CONFIG_NANO_USES_HYPER_SHIFT
 
 	if (os_likely(_os_cpu_number_override == -1)) {
-		return (_malloc_cpu_number() >> shift) % nano_common_max_magazines;
+		return ((_malloc_cpu_number() >> shift) % nano_common_max_magazines) &
+				MAX_CURRENT_BLOCKS_MASK;
 	}
-	return (_os_cpu_number_override >> shift) % nano_common_max_magazines;
+	return ((_os_cpu_number_override >> shift) % nano_common_max_magazines) &
+			MAX_CURRENT_BLOCKS_MASK;
 }
 #endif // OS_VARIANT_RESOLVED
 
@@ -1001,7 +1062,8 @@ nanov2_configure(void)
 MALLOC_NOEXPORT size_t
 nanov2_size(nanozonev2_t *nanozone, const void *ptr)
 {
-	size_t size = nanov2_pointer_size(nanozone, (void *)ptr, FALSE);
+	size_t size = nanov2_pointer_size_inline(nanozone, (void *)ptr, FALSE,
+			NULL, NULL);
 	return size ? size : nanozone->helper_zone->size(nanozone->helper_zone, ptr);
 }
 
@@ -1010,54 +1072,121 @@ nanov2_malloc(nanozonev2_t *nanozone, size_t size)
 {
 	size_t rounded_size = _nano_common_good_size(size);
 	if (rounded_size <= NANO_MAX_SIZE) {
-		void *ptr = nanov2_allocate(nanozone, rounded_size, FALSE);
-		if (ptr) {
-			if (os_unlikely(size && (nanozone->debug_flags & MALLOC_DO_SCRIBBLE))) {
-				memset(ptr, SCRIBBLE_BYTE, size);
+		nanov2_block_meta_t *madvise_block_metap = NULL;
+		nanov2_size_class_t size_class = nanov2_size_class_from_size(rounded_size);
+
+		// Get the index of the pointer to the block from which we are should be
+		// allocating. This currently depends on the physical CPU number.
+		int allocation_index = nanov2_get_allocation_block_index();
+
+		// Get the current allocation block meta data pointer. If this is NULL,
+		// we need to find a new allocation block.
+		nanov2_block_meta_t **block_metapp =
+				&nanozone->current_block[size_class][allocation_index];
+		nanov2_block_meta_t *block_metap = os_atomic_load(block_metapp, relaxed);
+		bool corruption = false;
+		void *ptr = NULL;
+		if (block_metap) {
+			// Fast path: we have a block -- try to allocate from it.
+			ptr = nanov2_allocate_from_block_inline(nanozone, block_metap,
+					size_class, &madvise_block_metap, &corruption);
+			if (ptr && !corruption) {
+				// Always clear the double-free guard so that we can recognize
+				// that this block is not on the free list.
+				nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
+				os_atomic_store(&slotp->double_free_guard, 0, relaxed);
+
+				// We know the body of the allocation is already clear, so we just
+				// need to clean up the next_slot word to get to all-zero.  Do so in
+				// all cases, even if a cleared allocation is not requested, to
+				// prevent any leakage through the next_slot bits.
+				os_atomic_store(&slotp->next_slot, 0, relaxed);
+				return ptr;
 			}
-			return ptr;
 		}
+
+		return nanov2_allocate_outlined(nanozone, block_metapp, rounded_size,
+				size_class, allocation_index, madvise_block_metap, ptr, false);
 	}
 
-	// If we reach this point, we couldn't allocate, so delegate to the
-	// helper zone.
+	// Too big for nano, so delegate to the helper zone.
 	return nanozone->helper_zone->malloc(nanozone->helper_zone, size);
+}
+
+MALLOC_ALWAYS_INLINE MALLOC_INLINE
+void
+nanov2_bzero(void *ptr, size_t size)
+{
+	// TODO: inline bzero from libplatform
+	bzero(ptr, size);
 }
 
 MALLOC_NOEXPORT void
 nanov2_free_definite_size(nanozonev2_t *nanozone, void *ptr, size_t size)
 {
-	// Check whether it's a Nano pointer and get the size. We should only get
-	// here if it is and furthermore we already know that "size" is the actual
-	// rounded size, so don't waste time rechecking that. This is just a
-	// sanity check.
 	if (ptr && nanov2_has_valid_signature(ptr)) {
-		if (os_unlikely(nanozone->debug_flags & MALLOC_DO_SCRIBBLE)) {
-			memset(ptr, SCRABBLE_BYTE, size);
+		nanov2_size_class_t size_class = nanov2_size_class_from_size(size);
+
+		if (malloc_zero_on_free) {
+			if (size_class != 0) {
+				nanov2_bzero((char *)ptr + sizeof(nanov2_free_slot_t),
+						size - sizeof(nanov2_free_slot_t));
+			}
 		}
-		nanov2_free_to_block(nanozone, ptr, nanov2_size_class_from_size(size));
+
+		nanov2_block_meta_t *madvise_block_metap = nanov2_free_to_block_inline(
+				nanozone, ptr, size_class, NULL);
+		if (madvise_block_metap) {
+			nanov2_madvise_block(nanozone, madvise_block_metap, size_class,
+					SLOT_CAN_MADVISE);
+		}
 		return;
 	}
 	return nanozone->helper_zone->free_definite_size(nanozone->helper_zone, ptr,
 			size);
 }
 
-MALLOC_NOEXPORT void
-nanov2_free(nanozonev2_t *nanozone, void *ptr)
+static void
+_nanov2_free(nanozonev2_t *nanozone, void *ptr, bool try)
 {
-	if (ptr && nanov2_has_valid_signature(ptr)) {
+	if (ptr) {
 		// Check whether it's a Nano pointer and get the size. If it's not
 		// Nano, pass it to the helper zone.
-		size_t size = nanov2_pointer_size(nanozone, ptr, FALSE);
+		nanov2_size_class_t size_class;
+		nanov2_block_meta_t *block_metap;
+		size_t size = nanov2_pointer_size_inline(nanozone, ptr, FALSE,
+				&size_class, &block_metap);
 		if (size) {
-			if (os_unlikely(nanozone->debug_flags & MALLOC_DO_SCRIBBLE)) {
-				memset(ptr, SCRABBLE_BYTE, size);
+			if (malloc_zero_on_free) {
+				if (size > sizeof(nanov2_free_slot_t)) {
+					nanov2_bzero((char *)ptr + sizeof(nanov2_free_slot_t),
+							size - sizeof(nanov2_free_slot_t));
+				}
 			}
-			nanov2_free_to_block(nanozone, ptr, nanov2_size_class_from_size(size));
+
+			nanov2_block_meta_t *madvise_block_metap = nanov2_free_to_block_inline(
+					nanozone, ptr, size_class, block_metap);
+			if (madvise_block_metap) {
+				nanov2_madvise_block(nanozone, madvise_block_metap, size_class,
+						SLOT_CAN_MADVISE);
+			}
 			return;
 		}
 	}
-	return nanozone->helper_zone->free(nanozone->helper_zone, ptr);
+	return try ? nanozone->helper_zone->try_free_default(nanozone->helper_zone, ptr) :
+			nanozone->helper_zone->free(nanozone->helper_zone, ptr);
+}
+
+MALLOC_NOEXPORT void
+nanov2_free(nanozonev2_t *nanozone, void *ptr)
+{
+	_nanov2_free(nanozone, ptr, false);
+}
+
+MALLOC_NOEXPORT void
+nanov2_try_free_default(nanozonev2_t *nanozone, void *ptr)
+{
+	_nanov2_free(nanozone, ptr, true);
 }
 
 MALLOC_NOEXPORT void *
@@ -1069,14 +1198,48 @@ nanov2_calloc(nanozonev2_t *nanozone, size_t num_items, size_t size)
 	}
 	size_t rounded_size = _nano_common_good_size(total_bytes);
 	if (total_bytes <= NANO_MAX_SIZE) {
-		void *ptr = nanov2_allocate(nanozone, rounded_size, TRUE);
-		if (ptr) {
-			return ptr;
+		nanov2_block_meta_t *madvise_block_metap = NULL;
+		nanov2_size_class_t size_class = nanov2_size_class_from_size(rounded_size);
+
+		// Get the index of the pointer to the block from which we are should be
+		// allocating. This currently depends on the physical CPU number.
+		int allocation_index = nanov2_get_allocation_block_index();
+
+		// Get the current allocation block meta data pointer. If this is NULL,
+		// we need to find a new allocation block.
+		nanov2_block_meta_t **block_metapp =
+				&nanozone->current_block[size_class][allocation_index];
+		nanov2_block_meta_t *block_metap = os_atomic_load(block_metapp, relaxed);
+		bool corruption = false;
+		void *ptr = NULL;
+		if (block_metap) {
+			// Fast path: we have a block -- try to allocate from it.
+			ptr = nanov2_allocate_from_block_inline(nanozone, block_metap,
+					size_class, &madvise_block_metap, &corruption);
+			if (ptr && !corruption) {
+				if (malloc_zero_on_free) {
+					// Always clear the double-free guard so that we can recognize that
+					// this block is not on the free list.
+					nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
+					os_atomic_store(&slotp->double_free_guard, 0, relaxed);
+
+					// We know the body of the allocation is already clear, so we just
+					// need to clean up the next_slot word to get to all-zero.  Do so in
+					// all cases, even if a cleared allocation is not requested, to
+					// prevent any leakage through the next_slot bits.
+					os_atomic_store(&slotp->next_slot, 0, relaxed);
+				} else {
+					nanov2_bzero(ptr, rounded_size);
+				}
+				return ptr;
+			}
 		}
+
+		return nanov2_allocate_outlined(nanozone, block_metapp, rounded_size,
+				size_class, allocation_index, madvise_block_metap, ptr, true);
 	}
 
-	// If we reach this point, we couldn't allocate, so delegate to the
-	// helper zone.
+	// Too big for nano, so delegate to the helper zone.
 	return nanozone->helper_zone->calloc(nanozone->helper_zone, 1, total_bytes);
 }
 #endif // OS_VARIANT_RESOLVED
@@ -1131,7 +1294,9 @@ nanov2_realloc(nanozonev2_t *nanozone, void *ptr, size_t new_size)
 			}
 		} else {
 			// Same size or shrinking by less than half size. Keep the same
-			// allocation and clear the area that's being released.
+			// allocation and scribble the area that's being released. Nothing
+			// to do for zero-on-free yet; that will be taken care of when the
+			// shrunk allocation is freed.
 			if (new_size != old_size) {
 				MALLOC_ASSERT(new_size < old_size);
 				if (os_unlikely(nanozone->debug_flags & MALLOC_DO_SCRIBBLE)) {
@@ -1178,7 +1343,8 @@ nanov2_batch_malloc(nanozonev2_t *nanozone, size_t size, void **results,
 	size_t rounded_size = _nano_common_good_size(size);
 	if (rounded_size <= NANO_MAX_SIZE) {
 		while (allocated < count) {
-			void *ptr = nanov2_allocate(nanozone, rounded_size, FALSE);
+			// TODO: nanov2_malloc will redo _nano_common_good_size
+			void *ptr = nanov2_malloc(nanozone, rounded_size);
 			if (!ptr) {
 				break;
 			}
@@ -1209,19 +1375,20 @@ nanov2_batch_free(nanozonev2_t *nanozone, void **to_be_freed, unsigned count)
 		}
 	}
 }
-#endif // OS_VARIANT_RESOLVED
 
-#if OS_VARIANT_NOTRESOLVED
-static void *
+MALLOC_NOEXPORT void *
 nanov2_memalign(nanozonev2_t *nanozone, size_t alignment, size_t size)
 {
-	// Always delegate this to the helper zone.
+	// Serve directly if the requested alignment is trivially satisfied by our
+	// baseline alignment (16 bytes)
+	if (alignment <= NANO_REGIME_QUANTA_SIZE) {
+		return nanov2_malloc(nanozone, size);
+	}
+
+	// Otherwise delegate to the helper zone
 	return nanozone->helper_zone->memalign(nanozone->helper_zone, alignment,
 			size);
 }
-#endif // OS_VARIANT_NOTRESOLVED
-
-#if OS_VARIANT_RESOLVED
 
 size_t
 nanov2_pressure_relief(nanozonev2_t *nanozone, size_t goal)
@@ -1243,9 +1410,12 @@ nanov2_pressure_relief(nanozonev2_t *nanozone, size_t goal)
 	// until we reach our goal.
 	nanov2_region_t *region = nanozone->first_region_base;
 	nanov2_meta_index_t metablock_meta_index = nanov2_metablock_meta_index(nanozone);
+	nanov2_arena_t *current_region_next_arena = os_atomic_load(
+			&nanozone->current_region_next_arena, acquire);
 	while (region) {
 		nanov2_arena_t *arena = nanov2_first_arena_for_region(region);
-		nanov2_arena_t *arena_after_region = nanov2_limit_arena_for_region(nanozone, region);
+		nanov2_arena_t *arena_after_region = nanov2_limit_arena_for_region(
+				nanozone, region, current_region_next_arena);
 		while (arena < arena_after_region) {
 			// Scan all of the blocks in the arena, skipping the metadata block.
 			nanov2_arena_metablock_t *meta_blockp =
@@ -1264,8 +1434,9 @@ nanov2_pressure_relief(nanozonev2_t *nanozone, size_t goal)
 					if (meta.next_slot == SLOT_CAN_MADVISE) {
 						nanov2_block_t *blockp = nanov2_block_address_from_meta_index(
 								nanozone, arena, i);
-						if (nanov2_madvise_block(nanozone, block_metap,
-								blockp, nanov2_size_class_for_ptr(nanozone, blockp))) {
+						if (nanov2_madvise_block_locked(nanozone, block_metap,
+								blockp, nanov2_size_class_for_ptr(nanozone, blockp),
+								SLOT_CAN_MADVISE)) {
 							total += NANOV2_BLOCK_SIZE;
 						}
 					}
@@ -1277,7 +1448,8 @@ nanov2_pressure_relief(nanozonev2_t *nanozone, size_t goal)
 			}
 			arena++;
 		}
-		region = nanov2_next_region_for_region(nanozone, region);
+		region = nanov2_next_region_for_region(nanozone, region,
+				current_region_next_arena);
 	}
 
 done:
@@ -1342,6 +1514,8 @@ nanov2_ptr_in_use_enumerator(task_t task, void *context, unsigned type_mask,
 	// Process the zone one region at a time. Report each in-use block as a
 	// pointer range and each in-use slot as a pointer.
 	nanov2_region_t *region = nanozone->first_region_base;
+	nanov2_arena_t *current_region_next_arena = os_atomic_load(
+			&nanozone->current_region_next_arena, acquire);
 	while (region) {
 		mach_vm_address_t vm_addr = (mach_vm_address_t)NULL;
 		kern_return_t kr = reader(task, (vm_address_t)region, NANOV2_REGION_SIZE, (void **)&vm_addr);
@@ -1353,7 +1527,8 @@ nanov2_ptr_in_use_enumerator(task_t task, void *context, unsigned type_mask,
 		// and its mapped address in this process.
 		mach_vm_offset_t ptr_offset = (mach_vm_address_t)region - vm_addr;
 		nanov2_arena_t *arena = nanov2_first_arena_for_region(region);
-		nanov2_arena_t *limit_arena = nanov2_limit_arena_for_region(nanozone, region);
+		nanov2_arena_t *limit_arena = nanov2_limit_arena_for_region(nanozone, region,
+				current_region_next_arena);
 		vm_range_t ptr_range;
 		while (arena < limit_arena) {
 			// Find the metadata block and process every entry, apart from the
@@ -1467,7 +1642,8 @@ nanov2_ptr_in_use_enumerator(task_t task, void *context, unsigned type_mask,
 		nanov2_region_linkage_t *mapped_region_linkagep =
 				NANOV2_ZONE_PTR_TO_MAPPED_PTR(nanov2_region_linkage_t *,
 				region_linkagep, ptr_offset);
-		int offset = mapped_region_linkagep->next_region_offset;
+		int offset = os_atomic_load(&mapped_region_linkagep->next_region_offset,
+				relaxed);
 		region = offset ? region + offset : NULL;
 	}
 	return 0;
@@ -1546,6 +1722,10 @@ nanov2_print(task_t task, unsigned level, vm_address_t zone_address,
 	nanov2_meta_index_t metablock_meta_index =
 			nanov2_metablock_meta_index(mapped_nanozone);
 	nanov2_region_t *region = mapped_nanozone->first_region_base;
+	// Use a single, consistent snapshot of current_region_next_arena throughout
+	// iteration, ignoring any arenas or regions allocated after it.
+	nanov2_arena_t *current_region_next_arena = os_atomic_load(
+			&mapped_nanozone->current_region_next_arena, acquire);
 	int region_index = 0;
 	while (region) {
 		printer("\nRegion %d: base address %p\n", region_index, region);
@@ -1559,7 +1739,7 @@ nanov2_print(task_t task, unsigned level, vm_address_t zone_address,
 
 		nanov2_arena_t *arena = nanov2_first_arena_for_region(region);
 		nanov2_arena_t *limit_arena = nanov2_limit_arena_for_region(
-				mapped_nanozone, region);
+				mapped_nanozone, region, current_region_next_arena);
 		int arena_index = 0;
 		while (arena < limit_arena) {
 			// Find the metadata block and process every entry, apart from the
@@ -1700,7 +1880,7 @@ nanov2_print(task_t task, unsigned level, vm_address_t zone_address,
 		}
 
 		region = nanov2_next_region_for_region_offset(mapped_nanozone, region,
-                region_offset);
+                region_offset, current_region_next_arena);
 		region_index++;
 	}
 }
@@ -1788,6 +1968,8 @@ nanov2_statistics(task_t task, vm_address_t zone_address,
 
 	// Iterate over each arena in each region. Within each region, add
 	// statistics for each slot in each block, excluding the meta data block.
+	nanov2_arena_t *current_region_next_arena = os_atomic_load(
+			&mapped_nanozone->current_region_next_arena, acquire);
 	for (region = mapped_nanozone->first_region_base; region;) {
         nanov2_region_t *mapped_region;
 		err = reader(task, (vm_address_t)region, sizeof(nanov2_region_t), (void **)&mapped_region);
@@ -1797,7 +1979,8 @@ nanov2_statistics(task_t task, vm_address_t zone_address,
         }
         off_t region_offset = (uintptr_t)mapped_region - (uintptr_t)region;
 		for (arena = nanov2_first_arena_for_region(region);
-				arena < nanov2_limit_arena_for_region(mapped_nanozone, region);
+				arena < nanov2_limit_arena_for_region(mapped_nanozone, region,
+						current_region_next_arena);
 				arena++) {
 			nanov2_arena_metablock_t *meta_block =
 					nanov2_metablock_address_for_ptr(mapped_nanozone, arena);
@@ -1849,7 +2032,7 @@ nanov2_statistics(task_t task, vm_address_t zone_address,
 			}
 		}
         region = nanov2_next_region_for_region_offset(mapped_nanozone,
-                region, region_offset);
+                region, region_offset, current_region_next_arena);
 	}
 	return KERN_SUCCESS;
 }
@@ -1909,8 +2092,10 @@ static const struct malloc_introspection_t nanov2_introspect = {
 // the allocation, or 0 if the pointer does not correspond to an active
 // allocation. If allow_inner is true, the pointer need not point to the start
 // of the allocation.
-size_t
-nanov2_pointer_size(nanozonev2_t *nanozone, void *ptr, boolean_t allow_inner)
+MALLOC_ALWAYS_INLINE MALLOC_INLINE size_t
+nanov2_pointer_size_inline(nanozonev2_t *nanozone, void *ptr,
+		boolean_t allow_inner, nanov2_size_class_t *size_class_out,
+		nanov2_block_meta_t **block_metap_out)
 {
 	// First check the address signature.
 	if (!nanov2_has_valid_signature((void *)ptr)) {
@@ -1922,25 +2107,40 @@ nanov2_pointer_size(nanozonev2_t *nanozone, void *ptr, boolean_t allow_inner)
 		return 0;
 	}
 
+	// Atomically load the value of current_region_next_arena. No thread is
+	// allowed to allocate from an arena until it observes a greater value of
+	// current_region_next_arena, which must have happened before now if we're
+	// being called in the context of a deallocation, so we can safely use it as
+	// the upper bound for an overall address range check.
+	nanov2_arena_t *current_region_next_arena = os_atomic_load(
+			&nanozone->current_region_next_arena, relaxed);
+
 	// Bounds check against the active address space.
 	if (ptr < (void *)nanozone->first_region_base ||
-			ptr > (void *)nanozone->current_region_next_arena) {
+			ptr > (void *)current_region_next_arena) {
 		return 0;
 	}
 
 #if NANOV2_MULTIPLE_REGIONS
 	// Need to check that the region part is valid because there could be holes.
 	// Do this only if we know there is a hole.
-	// NOTE: in M2 convergence, use a hashed structure to make this more
-	// efficient.
-	if (nanozone->statistics.region_address_clashes) {
+	//
+	// If we're looking at a legitimately-allocated nano pointer, a load-acquire
+	// of current_region_next_arena must have already happened when its
+	// containing arena was first allocated from, so any region_address_clashes
+	// increment that preceded the store-release of current_region_next_arena
+	// should be visible.
+	//
+	// TODO: use a hashed structure to make this more efficient.
+	if (os_atomic_load(&nanozone->statistics.region_address_clashes, relaxed)) {
 		nanov2_region_t *ptr_region = nanov2_region_address_for_ptr(ptr);
 		nanov2_region_t *region = nanozone->first_region_base;
 		while (region) {
 			if (ptr_region == region) {
 				break;
 			}
-			region = nanov2_next_region_for_region(nanozone, region);
+			region = nanov2_next_region_for_region(nanozone, region,
+					current_region_next_arena);
 		}
 		if (!region) {
 			// Reached the end of the region list without matching - not a
@@ -1977,27 +2177,42 @@ nanov2_pointer_size(nanozonev2_t *nanozone, void *ptr, boolean_t allow_inner)
 		return 0;
 	}
 
+	if (size_class_out) {
+		*size_class_out = size_class;
+	}
+	if (block_metap_out) {
+		*block_metap_out = block_metap;
+	}
 	return size;
+}
+
+size_t
+nanov2_pointer_size(nanozonev2_t *nanozone, void *ptr, boolean_t allow_inner)
+{
+	return nanov2_pointer_size_inline(nanozone, ptr, allow_inner, NULL, NULL);
 }
 
 #pragma mark -
 #pragma mark Madvise Management
 
-// Given a pointer to a block and its metadata, calls madvise() on that block
-// if it is in state SLOT_CAN_MADVISE. Returns true on success, false if the
-// block is not in the correct state or if the state changed during the
-// operation.
+// Given a pointer to a block and its metadata, calls madvise() on that block if
+// it is still in the state we expect, either SLOT_CAN_MADVISE or SLOT_MADVISED
+// (the latter expected when we need to pessimistically re-madvise a block we
+// may have touched while racing to allocate against a transition to
+// SLOT_CAN_MADVISE). Returns true on success, false if the block is not in the
+// correct state or if the state changed during the operation.
 //
 // This function must be called with the zone's madvise_lock held
-boolean_t
-nanov2_madvise_block(nanozonev2_t *nanozone, nanov2_block_meta_t *block_metap,
-		nanov2_block_t *blockp, nanov2_size_class_t size_class)
+static boolean_t
+nanov2_madvise_block_locked(nanozonev2_t *nanozone,
+		nanov2_block_meta_t *block_metap, nanov2_block_t *blockp,
+		nanov2_size_class_t size_class, uint32_t expected_state)
 {
 	_malloc_lock_assert_owner(&nanozone->madvise_lock);
 
 	boolean_t madvised = FALSE;
 	nanov2_block_meta_t old_meta = os_atomic_load(block_metap, relaxed);
-	if (old_meta.next_slot == SLOT_CAN_MADVISE) {
+	if (old_meta.next_slot == expected_state) {
 		// Nobody raced with us. We can safely madvise this block. First change
 		// the state to SLOT_MADVISING so that other threads don't try to
 		// grab the block for new allocations.
@@ -2039,6 +2254,18 @@ nanov2_madvise_block(nanozonev2_t *nanozone, nanov2_block_meta_t *block_metap,
 	return madvised;
 }
 
+static void
+nanov2_madvise_block(nanozonev2_t *nanozone, nanov2_block_meta_t *block_metap,
+		nanov2_size_class_t size_class, uint32_t expected_state)
+{
+	nanov2_block_t *blockp = nanov2_block_address_from_meta_ptr(nanozone,
+			block_metap);
+	_malloc_lock_lock(&nanozone->madvise_lock);
+	nanov2_madvise_block_locked(nanozone, block_metap, blockp, size_class,
+			expected_state);
+	_malloc_lock_unlock(&nanozone->madvise_lock);
+}
+
 #endif // OS_VARIANT_RESOLVED
 
 #pragma mark -
@@ -2069,45 +2296,62 @@ nanov2_allocate_region(nanov2_region_t *region)
 
 // Allocates a new region adjacent to the current one. If the allocation fails,
 // keep sliding up by the size of a region until we either succeed or run out of
-// address space. The caller must own the Nanozone regions lock.
-MALLOC_NOEXPORT boolean_t
+// address space. The caller must own the Nanozone regions lock. Returns the
+// first arena of the newly-allocated region if successful, or NULL otherwise.
+MALLOC_NOEXPORT nanov2_arena_t *
 nanov2_allocate_new_region(nanozonev2_t *nanozone)
 {
 #if NANOV2_MULTIPLE_REGIONS
-	boolean_t result = FALSE;
+	bool allocated = false;
 
 	_malloc_lock_assert_owner(&nanozone->regions_lock);
-	nanov2_region_t *current_region = nanozone->current_region_base;
-	nanov2_region_t *next_region = (nanov2_region_t *)nanozone->current_region_limit;
+	nanov2_region_t *current_region = nanov2_current_region_base(
+			os_atomic_load(&nanozone->current_region_next_arena, relaxed));
+	nanov2_region_t *next_region = current_region + 1;
 	while ((void *)next_region <= nanov2_max_region_base.addr) {
 		if (nanov2_allocate_region(next_region)) {
-			nanozone->current_region_base = next_region;
-			nanozone->current_region_next_arena = (nanov2_arena_t *)next_region;
-			nanozone->current_region_limit = next_region + 1;
 			nanozone->statistics.allocated_regions++;
-			result = TRUE;
+			allocated = true;
 			break;
 		}
 		next_region++;
-		nanozone->statistics.region_address_clashes++;
+
+		// Loaded atomically in nanov2_pointer_size() to determine whether or
+		// not it's necessary to walk the region list, so we need to increment
+		// atomically here. Published by the store-release of
+		// current_region_next_arena.
+		os_atomic_inc(&nanozone->statistics.region_address_clashes, relaxed);
 	}
 
-	if (result) {
-		// Link this region to the previous one.
-		nanov2_region_linkage_t *current_region_linkage =
-				nanov2_region_linkage_for_region(nanozone, current_region);
-		nanov2_region_linkage_t *next_region_linkage =
-				nanov2_region_linkage_for_region(nanozone, next_region);
-		uint16_t offset = next_region - current_region;
-		current_region_linkage->next_region_offset = offset;
-		next_region_linkage->next_region_offset = 0;
+	if (!allocated) {
+		return NULL;
 	}
 
-	return result;
+	// Link this region to the previous one.
+	nanov2_region_linkage_t *current_region_linkage =
+			nanov2_region_linkage_for_region(nanozone, current_region);
+
+	// The linkage of the next region is in pristine memory, so already zero -
+	// don't touch it.
+
+	// Store-release the linkage update so any dependent loads through it
+	// observe the (implicit zero-)initialization of the next region.
+	uint16_t offset = next_region - current_region;
+	os_atomic_store(&current_region_linkage->next_region_offset, offset,
+			release);
+
+	// Store-release the update to current_region_next_arena to publish the
+	// linkage update. Pairs with load-acquires of current_region_next_arena
+	// followed by walks of the region list.
+	nanov2_arena_t *first_arena = nanov2_first_arena_for_region(next_region);
+	os_atomic_store(&nanozone->current_region_next_arena, first_arena + 1,
+			release);
+
+	return first_arena;
 #else // NANOV2_MULTIPLE_REGIONS
 	// On iOS, only one region is supported, so we fail since the first
 	// region is allocated separately.
-	return FALSE;
+	return NULL;
 #endif // CONFIG_NANOV2_MULTIPLE_REGIONS
 }
 #endif // OS_VARIANT_NOTRESOLVED
@@ -2117,18 +2361,38 @@ nanov2_allocate_new_region(nanozonev2_t *nanozone)
 
 #if OS_VARIANT_RESOLVED
 
+MALLOC_NOINLINE MALLOC_NORETURN
+static void
+nanov2_guard_corruption_detected(void *corrupt_slot)
+{
+	uint64_t guard = *(uint64_t *)corrupt_slot;
+	malloc_zone_error(MALLOC_ABORT_ON_CORRUPTION, true,
+			"Heap corruption detected, free list is damaged at %p\n"
+			"*** Incorrect guard value: %lu\n", corrupt_slot, guard);
+	__builtin_unreachable();
+}
+
 // Allocates memory from the block that corresponds to a given block meta data
 // pointer. The memory is taken from the free list if possible, or from the
 // unused region of the block if not. If the block is no longer in use or is
 // full, NULL is returned and the caller is expected to find another block to
 // allocate from.
-MALLOC_NOEXPORT
+MALLOC_ALWAYS_INLINE MALLOC_INLINE
 void *
-nanov2_allocate_from_block(nanozonev2_t *nanozone,
-		nanov2_block_meta_t *block_metap, nanov2_size_class_t size_class)
+nanov2_allocate_from_block_inline(nanozonev2_t *nanozone,
+		nanov2_block_meta_t *block_metap, nanov2_size_class_t size_class,
+		nanov2_block_meta_t **madvise_block_metap_out, bool *corruption)
 {
 	nanov2_block_meta_view_t old_meta_view;
-	old_meta_view.meta = os_atomic_load(block_metap, relaxed);
+
+	// Our loads of the block metadata use dependency ordering, which guarantees
+	// that any loads we do from a slot pointer derived from the metadata value
+	// as we do below will observe all of the stores preceding the store-release
+	// of that value we observed.  This allows us to safely rely on the contents
+	// of the slot updated when it was last freed, including the double-free
+	// guard and zeroing done by zero-on-free (which is required for correctness
+	// in the case of calloc).
+	old_meta_view.meta = os_atomic_load(block_metap, dependency);
 
 	// Calculating blockp and ptr is relatively expensive. Do both lazily to
 	// minimize the time in the block starting with "again:" and ending with the
@@ -2178,21 +2442,8 @@ again:
 		if (old_meta_view.meta.next_slot == SLOT_CAN_MADVISE ||
 				old_meta_view.meta.next_slot == SLOT_MADVISING ||
 				old_meta_view.meta.next_slot == SLOT_MADVISED) {
-			_malloc_lock_lock(&nanozone->madvise_lock);
-			if (old_meta_view.meta.next_slot == SLOT_MADVISED) {
-				// We raced against another thread madvising this block. We need
-				// to redo the madvise because we may have touched it when
-				// reading the next pointer in the freelist.
-				if (!blockp) {
-					blockp = nanov2_block_address_from_meta_ptr(nanozone, block_metap);
-				}
-				if (mvm_madvise_free(nanozone, nanov2_region_address_for_ptr(blockp),
-						(uintptr_t)blockp, (uintptr_t)(blockp + 1), NULL, FALSE)) {
-					malloc_zone_error(0, false,
-							"Failed to remadvise block at blockp: %p, error: %d\n", blockp, errno);
-				}
-			}
-			_malloc_lock_unlock(&nanozone->madvise_lock);
+			*madvise_block_metap_out = block_metap;
+			return NULL;
 		}
 		goto again;
 	}
@@ -2204,26 +2455,40 @@ again:
 		ptr = nanov2_slot_in_block_ptr(blockp, size_class, slot);
 	}
 
-	nanov2_free_slot_t *slotp = os_atomic_inject_dependency(ptr,
-			(unsigned long)old_meta_view.bits);
 	if (from_free_list) {
 		// We grabbed the item from the free list. Check the free list canary
 		// and crash if it's not valid. We can't do this check before the
 		// cmpxchgv because another thread may race with us, claim the slot and
 		// write to it.
+		nanov2_free_slot_t *slotp = ptr;
 		uintptr_t guard = os_atomic_load(&slotp->double_free_guard, relaxed);
-		if ((guard ^ nanozone->slot_freelist_cookie) != (uintptr_t)ptr) {
-			malloc_zone_error(MALLOC_ABORT_ON_CORRUPTION, true,
-					"Heap corruption detected, free list is damaged at %p\n"
-					"*** Incorrect guard value: %lu\n", ptr, guard);
-			__builtin_unreachable();
+		if (os_unlikely((guard ^ nanozone->slot_freelist_cookie) != (uintptr_t)ptr)) {
+			*corruption = true;
 		}
 	}
-	
+
 #if DEBUG_MALLOC
 	nanozone->statistics.size_class_statistics[size_class].total_allocations++;
 #endif // DEBUG_MALLOC
 
+	return ptr;
+}
+
+static void *
+nanov2_allocate_from_block(nanozonev2_t *nanozone,
+		nanov2_block_meta_t *block_metap, nanov2_size_class_t size_class)
+{
+	nanov2_block_meta_t *madvise_block_metap = NULL;
+	bool corruption = false;
+	void *ptr = nanov2_allocate_from_block_inline(nanozone, block_metap,
+			size_class, &madvise_block_metap, &corruption);
+	if (os_unlikely(corruption)) {
+		nanov2_guard_corruption_detected(ptr);
+	}
+	if (madvise_block_metap) {
+		nanov2_madvise_block(nanozone, madvise_block_metap, size_class,
+				SLOT_MADVISED);
+	}
 	return ptr;
 }
 
@@ -2458,8 +2723,13 @@ retry:
 	start_region = nanov2_region_address_for_ptr(arena);
 	nanov2_arena_t *start_arena = arena;
 	nanov2_region_t *region = start_region;
-	nanov2_arena_t *limit_arena = nanov2_limit_arena_for_region(nanozone, start_region);
-	nanov2_arena_t *initial_region_next_arena = nanozone->current_region_next_arena;
+	// The load-acquire pairs with store-release in nanov2_allocate_new_region()
+	// to make the most recent region linkage update visible when we load it in
+	// nanov2_next_region_for_region() below.
+	nanov2_arena_t *initial_region_next_arena = os_atomic_load(
+			&nanozone->current_region_next_arena, acquire);
+	nanov2_arena_t *limit_arena = nanov2_limit_arena_for_region(nanozone,
+			start_region, initial_region_next_arena);
 	do {
 		nanov2_block_meta_t *block_metap = nanov2_find_block_in_arena(nanozone,
 				arena, size_class, start_block);
@@ -2495,13 +2765,15 @@ retry:
 		start_block = NULL;
 		arena++;
 		if (arena >= limit_arena) {
-			region = nanov2_next_region_for_region(nanozone, region);
+			region = nanov2_next_region_for_region(nanozone, region,
+					initial_region_next_arena);
 			if (!region) {
 				// Reached the last region -- loop back to the first.
 				region = nanozone->first_region_base;
 			}
 			arena = nanov2_first_arena_for_region(region);
-			limit_arena = nanov2_limit_arena_for_region(nanozone, region);
+			limit_arena = nanov2_limit_arena_for_region(nanozone, region,
+					initial_region_next_arena);
 		}
 	} while (arena != start_arena);
 
@@ -2512,29 +2784,42 @@ retry:
 	}
 
 	// Allocate a new arena and maybe a new region. To do either of those
-	// things, we need to take the regions_lock. After doing so, check that
-	// the state is unchanged. If it has, just assume that we might have some
-	// new space to allocate into and try again.
+	// things, we need to take the regions_lock. After doing so, check that the
+	// state is unchanged. If it has, just assume that we might have some new
+	// space to allocate into and try again.
+
 	boolean_t failed = FALSE;
-	arena = initial_region_next_arena;
+
 	_malloc_lock_lock(&nanozone->regions_lock);
-	if (nanozone->current_region_next_arena == arena) {
-		if ((void *)arena >= nanozone->current_region_limit) {
+	nanov2_arena_t *current_region_next_arena = os_atomic_load(
+			&nanozone->current_region_next_arena, relaxed);
+	if (current_region_next_arena == initial_region_next_arena) {
+		if (nanov2_current_region_next_arena_is_limit(
+				current_region_next_arena)) {
 			// Reached the end of the region. Allocate a new one, if we can.
-			if (nanov2_allocate_new_region(nanozone)) {
-				arena = nanozone->current_region_next_arena++;
-			} else {
+			arena = nanov2_allocate_new_region(nanozone);
+			if (!arena) {
 				failed = TRUE;
 			}
 		} else {
-			// Assign the new arena, in the same region.
-			nanozone->current_region_next_arena = arena + 1;
+			// Assign the new arena, in the current region.
+			arena = current_region_next_arena;
+
+			// Bump current_region_next_arena by 1. No need for an atomic add
+			// because we're under the regions_lock.
+			os_atomic_store(&nanozone->current_region_next_arena,
+					current_region_next_arena + 1, relaxed);
 		}
 
 		// Set up the guard blocks for the new arena, if requested
 		if (!failed) {
 			nanov2_init_guard_blocks(nanozone, arena);
 		}
+	} else {
+		// The arena just before current_region_next_arena is always the most
+		// recently allocated arena. Let's retry from that arena, which was
+		// allocated in the time since we started our last try.
+		arena = current_region_next_arena - 1;
 	}
 	_malloc_lock_unlock(&nanozone->regions_lock);
 
@@ -2551,39 +2836,36 @@ retry:
 	return NULL;
 }
 
-// Allocates memory of a given size (which must be a multiple of the Nano
-// quantum size) and optionally clears it (for calloc).
+// This function is called when a fast-path allocation from a given (size_class,
+// allocation_index) has been tried and failed, and we need to act on
+// observations from that attempt and/or retry the allocation.  Its rather
+// tortured calling contract is designed to allow the caller to avoid pushing a
+// frame and pass along as much of what it has already computed as possible.
 //
-// Allocation is attempted first from the block last used for the caller's
-// context (which is initially the physical CPU by default). If there is no
-// last block, or the block is full or now out of use, find another one, if
-// possible. See the comments for nanov2_get_allocation_block() for the details.
+// If @corrupt_slot is non-NULL it means we detected corruption of the slot's
+// guard on the fast path, and we need to report that corruption.
+//
+// If @madvise_block_metap is non-NULL it means we raced with another thread
+// madvising the block we tried to allocate from and need to re-madvise it.
 //
 // If the allocation fails, NULL is returned.
-void *
-nanov2_allocate(nanozonev2_t *nanozone, size_t rounded_size, boolean_t clear)
+static void *
+nanov2_allocate_outlined(nanozonev2_t *nanozone, nanov2_block_meta_t **block_metapp,
+		size_t rounded_size, nanov2_size_class_t size_class,
+		int allocation_index, nanov2_block_meta_t *madvise_block_metap,
+		void *corrupt_slot, bool clear)
 {
 	void *ptr = NULL;
-	nanov2_size_class_t size_class = nanov2_size_class_from_size(rounded_size);
-	MALLOC_ASSERT(size_class < NANO_SIZE_CLASSES);
-	MALLOC_ASSERT(rounded_size != 0);
-	nanov2_block_meta_t *block_metap;
-	nanov2_block_meta_t **block_metapp;
 
-	// Get the index of the pointer to the block from which we are should be
-	// allocating. This currently depends on the physical CPU number.
-	int allocation_index = nanov2_get_allocation_block_index() & MAX_CURRENT_BLOCKS_MASK;
+	if (os_unlikely(corrupt_slot)) {
+		nanov2_guard_corruption_detected(corrupt_slot);
+	}
 
-	// Get the current allocation block meta data pointer. If this is NULL,
-	// we need to find a new allocation block.
-	block_metapp = &nanozone->current_block[size_class][allocation_index];
-	block_metap = os_atomic_load(block_metapp, relaxed);
-	if (block_metap) {
-		// Fast path: we have a block -- try to allocate from it.
-		ptr = nanov2_allocate_from_block(nanozone, block_metap, size_class);
-		if (ptr) {
-			goto done;
-		}
+	// If we need to re-madvise the old block that we might have accidentally
+	// touched out of turn, do so now.
+	if (madvise_block_metap) {
+		nanov2_madvise_block(nanozone, madvise_block_metap, size_class,
+				SLOT_MADVISED);
 	}
 
 	// No current allocation block, or we were unable to allocate. We need to
@@ -2600,7 +2882,7 @@ nanov2_allocate(nanozonev2_t *nanozone, size_t rounded_size, boolean_t clear)
 	_malloc_lock_s *lock = &nanozone->current_block_lock[size_class][allocation_index];
 	_malloc_lock_lock(lock);
 
-	block_metap = os_atomic_load(block_metapp, relaxed);
+	nanov2_block_meta_t *block_metap = os_atomic_load(block_metapp, relaxed);
 	if (block_metap) {
 		ptr = nanov2_allocate_from_block(nanozone, block_metap, size_class);
 		if (ptr) {
@@ -2622,21 +2904,37 @@ unlock:
 		// We could not find a block to allocate from -- make future
 		// allocations for this size class go to the helper zone until
 		// we have enough free space.
-		_malloc_lock_lock(&nanozone->delegate_allocations_lock);
-		nanozone->delegate_allocations |= 1 << size_class;
-		_malloc_lock_unlock(&nanozone->delegate_allocations_lock);
+		os_atomic_or(&nanozone->delegate_allocations,
+				(uint16_t)(1 << size_class), relaxed);
+
+		ptr = nanozone->helper_zone->malloc(nanozone->helper_zone, rounded_size);
 	}
 
 done:
-	if (ptr) {
-		if (clear) {
-			memset(ptr, '\0', rounded_size);
-		} else {
+	if (os_likely(ptr)) {
+		if (malloc_zero_on_free) {
 			// Always clear the double-free guard so that we can recognize that
 			// this block is not on the free list.
 			nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
 			os_atomic_store(&slotp->double_free_guard, 0, relaxed);
+
+			// We know the body of the allocation is already clear, so we just
+			// need to clean up the next_slot word to get to all-zero.  Do so in
+			// all cases, even if a cleared allocation is not requested, to
+			// prevent any leakage through the next_slot bits.
+			os_atomic_store(&slotp->next_slot, 0, relaxed);
+		} else {
+			if (clear) {
+				memset(ptr, '\0', rounded_size);
+			} else {
+				// Always clear the double-free guard so that we can recognize that
+				// this block is not on the free list.
+				nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
+				os_atomic_store(&slotp->double_free_guard, 0, relaxed);
+			}
 		}
+	} else {
+		malloc_set_errno_fast(MZ_POSIX, ENOMEM);
 	}
 	return ptr;
 }
@@ -2645,20 +2943,32 @@ done:
 #pragma mark Freeing
 
 // Frees an allocation to its owning block and updates the block's state.
-// If the block becomes empty, it is marked as SLOT_CAN_MADVISE and is
-// madvised immediately if the policy is NANO_MADVISE_IMMEDIATE.
-void
-nanov2_free_to_block(nanozonev2_t *nanozone, void *ptr,
-		nanov2_size_class_t size_class)
+//
+// If the block becomes empty, it is marked as SLOT_CAN_MADVISE and we return
+// the block to the caller to madvise if dictated by policy.
+MALLOC_ALWAYS_INLINE MALLOC_INLINE
+nanov2_block_meta_t *
+nanov2_free_to_block_inline(nanozonev2_t *nanozone, void *ptr,
+		nanov2_size_class_t size_class, nanov2_block_meta_t *block_metap)
 {
 	nanov2_block_t *blockp = nanov2_block_address_for_ptr(ptr);
-	nanov2_block_meta_t *block_metap = nanov2_meta_ptr_for_ptr(nanozone, ptr);
+	if (!block_metap) {
+		block_metap = nanov2_meta_ptr_for_ptr(nanozone, ptr);
+	}
 
 	// Release the slot memory onto the block's freelist.
 	nanov2_block_meta_t old_meta = os_atomic_load(block_metap, relaxed);
 	int slot_count = slots_by_size_class[size_class];
 	nanov2_block_meta_t new_meta;
 	boolean_t was_full;
+
+	nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
+	// All of the free slot content (double_free_guard, next_slot word and the
+	// zeroed remainder of the slot) must be visible when the os_atomic_cmpxchgv
+	// completes, so the metadata updates on either path below need a release
+	// barrier.
+	os_atomic_store(&slotp->double_free_guard,
+			nanozone->slot_freelist_cookie ^ (uintptr_t)ptr, relaxed);
 
 again:
 	was_full = old_meta.next_slot == SLOT_FULL;
@@ -2668,12 +2978,14 @@ again:
 	boolean_t freeing_last_active_slot = !was_full &&
 			new_meta.free_count == slots_by_size_class[size_class] - 1;
 	if (freeing_last_active_slot) {
+		os_atomic_store(&slotp->next_slot, SLOT_NULL, relaxed);
+
 		// Releasing the last active slot onto the free list. Mark the block as
 		// ready to be madvised if it's not in use, otherwise reset next_slot
 		// to SLOT_BUMP.
 		new_meta.next_slot = new_meta.in_use ? SLOT_BUMP : SLOT_CAN_MADVISE;
 		// Write the updated meta data; try again if we raced with another thread.
-		if (!os_atomic_cmpxchgv(block_metap, old_meta, new_meta, &old_meta, relaxed)) {
+		if (!os_atomic_cmpxchgv(block_metap, old_meta, new_meta, &old_meta, release)) {
 			goto again;
 		}
 
@@ -2681,20 +2993,14 @@ again:
 		// is to do so immediately.
 		if (new_meta.next_slot == SLOT_CAN_MADVISE &&
 				nanov2_madvise_policy == NANO_MADVISE_IMMEDIATE) {
-			_malloc_lock_lock(&nanozone->madvise_lock);
-			nanov2_madvise_block(nanozone, block_metap, blockp, size_class);
-			_malloc_lock_unlock(&nanozone->madvise_lock);
+			return block_metap;
 		}
 	} else {
 		int slot_index = nanov2_slot_index_in_block(blockp, size_class, ptr);
 		new_meta.next_slot = slot_index + 1;  // meta.next_slot is 1-based
-		nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
-		slotp->next_slot = was_full ? SLOT_BUMP : old_meta.next_slot;
-		os_atomic_store(&slotp->double_free_guard,
-				nanozone->slot_freelist_cookie ^ (uintptr_t)ptr, relaxed);
+		os_atomic_store(&slotp->next_slot,
+				was_full ? SLOT_BUMP : old_meta.next_slot, relaxed);
 
-		// The double_free_guard change must be visible when the os_atomic_cmpxchgv
-		// completes.
 		// Write the updated meta data; try again if we raced with another thread.
 		if (!os_atomic_cmpxchgv(block_metap, old_meta, new_meta, &old_meta, release)) {
 			goto again;
@@ -2708,14 +3014,14 @@ again:
 	uint16_t class_mask = 1 << size_class;
 	if (!new_meta.in_use && (nanozone->delegate_allocations & class_mask) &&
 			(new_meta.free_count >= 0.75 * slot_count)) {
-		_malloc_lock_lock(&nanozone->delegate_allocations_lock);
-		nanozone->delegate_allocations &= ~class_mask;
-		_malloc_lock_unlock(&nanozone->delegate_allocations_lock);
+		os_atomic_and(&nanozone->delegate_allocations, ~class_mask, relaxed);
 	}
 
 #if DEBUG_MALLOC
 	nanozone->statistics.size_class_statistics[size_class].total_frees++;
 #endif // DEBUG_MALLOC
+
+	return NULL;
 }
 
 #endif // OS_VARIANT_RESOLVED
@@ -2744,7 +3050,7 @@ nanov2_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags)
 	}
 
 	// Set up the basic_zone portion of the nanozonev2 structure
-	nanozone->basic_zone.version = 12;
+	nanozone->basic_zone.version = 13;
 	nanozone->basic_zone.size = OS_RESOLVED_VARIANT_ADDR(nanov2_size);
 	nanozone->basic_zone.malloc = OS_RESOLVED_VARIANT_ADDR(nanov2_malloc);
 	nanozone->basic_zone.calloc = OS_RESOLVED_VARIANT_ADDR(nanov2_calloc);
@@ -2756,10 +3062,11 @@ nanov2_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags)
 	nanozone->basic_zone.batch_free = OS_RESOLVED_VARIANT_ADDR(nanov2_batch_free);
 	nanozone->basic_zone.introspect =
 			(struct malloc_introspection_t *)&nanov2_introspect;
-	nanozone->basic_zone.memalign = (void *)nanov2_memalign;
+	nanozone->basic_zone.memalign = OS_RESOLVED_VARIANT_ADDR(nanov2_memalign);
 	nanozone->basic_zone.free_definite_size = OS_RESOLVED_VARIANT_ADDR(nanov2_free_definite_size);
 	nanozone->basic_zone.pressure_relief = OS_RESOLVED_VARIANT_ADDR(nanov2_pressure_relief);
 	nanozone->basic_zone.claimed_address = OS_RESOLVED_VARIANT_ADDR(nanov2_claimed_address);
+	nanozone->basic_zone.try_free_default = OS_RESOLVED_VARIANT_ADDR(nanov2_try_free_default);
 
 	// Set these both to zero as required by CFAllocator.
 	nanozone->basic_zone.reserved1 = 0;
@@ -2810,13 +3117,12 @@ nanov2_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags)
 	}
 	nanov2_region_linkage_t *region_linkage =
 			nanov2_region_linkage_for_region(nanozone, region);
-	region_linkage->next_region_offset = 0;
+	os_atomic_store(&region_linkage->next_region_offset, 0, relaxed);
 
 	// Install the first region and pre-allocate the first arena.
 	nanozone->first_region_base = region;
-	nanozone->current_region_base = region;
-	nanozone->current_region_next_arena = ((nanov2_arena_t *)region) + 1;
-	nanozone->current_region_limit = region + 1;
+	os_atomic_store(&nanozone->current_region_next_arena,
+			((nanov2_arena_t *)region) + 1, release);
 	nanozone->statistics.allocated_regions = 1;
 
 	// Set up the guard blocks for the initial arena, if requested
@@ -2852,6 +3158,14 @@ nanov2_forked_calloc(nanozonev2_t *nanozone, size_t num_items, size_t size)
 {
 	// Just hand to the helper zone.
 	return nanozone->helper_zone->calloc(nanozone->helper_zone, num_items,
+			size);
+}
+
+static void *
+nanov2_forked_memalign(nanozonev2_t *nanozone, size_t alignment, size_t size)
+{
+	// Just hand to the helper zone.
+	return nanozone->helper_zone->memalign(nanozone->helper_zone, alignment,
 			size);
 }
 
@@ -2993,10 +3307,11 @@ nanov2_forked_zone(nanozonev2_t *nanozone)
 	nanozone->basic_zone.batch_free = OS_RESOLVED_VARIANT_ADDR(nanov2_forked_batch_free);
 	nanozone->basic_zone.introspect =
 			(struct malloc_introspection_t *)&nanov2_introspect;// Unchanged
-	nanozone->basic_zone.memalign = (void *)nanov2_memalign; 	// Unchanged
+	nanozone->basic_zone.memalign = (void *)nanov2_forked_memalign;
 	nanozone->basic_zone.free_definite_size =
 			OS_RESOLVED_VARIANT_ADDR(nanov2_forked_free_definite_size);
 	nanozone->basic_zone.claimed_address = nanov2_forked_claimed_address;
+	nanozone->basic_zone.try_free_default = NULL; // Fall back to old protocol
 	mprotect(nanozone, sizeof(nanozone->basic_zone), PROT_READ);
 }
 

@@ -29,21 +29,21 @@
 #pragma mark -
 #pragma mark Address Structure
 
-#if TARGET_OS_OSX || TARGET_OS_SIMULATOR || TARGET_OS_DRIVERKIT
+#if TARGET_OS_OSX || TARGET_OS_SIMULATOR || MALLOC_TARGET_DK_OSX
 
 #define NANOV2_REGION_BITS		15
 #define NANOV2_ARENA_BITS		3
 #define NANOV2_BLOCK_BITS		12
 #define NANOV2_OFFSET_BITS		14
 
-#else // TARGET_OS_OSX || TARGET_OS_SIMULATOR || TARGET_OS_DRIVERKIT
+#else // TARGET_OS_OSX || TARGET_OS_SIMULATOR || MALLOC_TARGET_DK_OSX
 
 #define NANOV2_REGION_BITS		0
 #define NANOV2_ARENA_BITS		3
 #define NANOV2_BLOCK_BITS		12
 #define NANOV2_OFFSET_BITS		14
 
-#endif // TARGET_OS_OSX || TARGET_OS_SIMULATOR || TARGET_OS_DRIVERKIT
+#endif // TARGET_OS_OSX || TARGET_OS_SIMULATOR || MALLOC_TARGET_DK_OSX
 
 #if NANOV2_REGION_BITS > 0
 #define NANOV2_MULTIPLE_REGIONS	1
@@ -181,8 +181,10 @@ MALLOC_STATIC_ASSERT(sizeof(nanov2_arena_metablock_t) == NANOV2_BLOCK_SIZE,
 // Structure overlaid on slots that are on the block freelist.
 typedef struct {
     uint64_t double_free_guard;
-    uint16_t next_slot;
+    uint64_t next_slot; // Legal values are <= NEXT_SLOT_VALID_MASK
 } nanov2_free_slot_t;
+
+#define NEXT_SLOT_VALID_MASK 0x7ff
 
 MALLOC_STATIC_ASSERT(
 		sizeof(nanov2_free_slot_t) <= NANO_REGIME_QUANTA_SIZE,
@@ -204,8 +206,10 @@ typedef struct {
 
 // Linkage between regions. Overlays the nanov2_block_meta_t that corresponds
 // to the arena metadata block, so must be the same size as nanov2_block_meta_t.
+// Accessed atomically when walking the regions.
 typedef struct {
-    uint16_t next_region_offset;	// Offset to next region in 512MB blocks
+	// Offset to next region in 512MB blocks
+	os_atomic(uint16_t) next_region_offset;
 	uint16_t unused;
 } nanov2_region_linkage_t;
 
@@ -257,9 +261,6 @@ typedef struct nanozonev2_s {
 	// Locks for the current allocation blocks.
 	_malloc_lock_s		current_block_lock[NANO_SIZE_CLASSES][MAX_CURRENT_BLOCKS];
 
-	// Lock for delegate_allocations.
-	_malloc_lock_s		delegate_allocations_lock;
-
 	// Mask of size classes for which allocation should be delegated when a new
 	// block is needed and the class has become full.
 	uint16_t			delegate_allocations;
@@ -281,23 +282,22 @@ typedef struct nanozonev2_s {
 	// Lock used to serialize access to current_block.
 	_malloc_lock_s		blocks_lock;
 
-	// Lock used to protect current_region_base, current_region_next_arena and
-	// current_region_limit.
+	// Lock used to protect modification of current_region_next_arena.
 	_malloc_lock_s		regions_lock;
 	
 	// Base address of the first region. Fixed once set.
 	nanov2_region_t 	*first_region_base;
 	
-	// Base address of the current region. Always the most recently allocated
-	// region and therefore the one with the highest base address.
-	nanov2_region_t 	*current_region_base;
-	
-	// Address to use for the next arena. Always between current_region_base
-	// and current_region_limit.
-	nanov2_arena_t		*current_region_next_arena;
-	
- 	// Limit address of the current region (first byte after the region).
- 	void				*current_region_limit;
+	// Address to use for the next arena, or the limit arena of the current
+	// region (i.e. the first byte after the end of the current region) if the
+	// current region is full. This is always the upper bound on addresses that
+	// can possibly be allocated from nano. When a new region is allocated, this
+	// is set directly to the _second_ arena of the new region, so a value on a
+	// region boundary is always a limit arena rather than a first arena.
+	//
+	// Modified under the protection of the regions_lock but atomically loaded
+	// outside of it from fast-path contexts; access with care.
+	os_atomic(nanov2_arena_t *) current_region_next_arena;
 	
 	// Lock used when madvising.
 	_malloc_lock_s		madvise_lock;
