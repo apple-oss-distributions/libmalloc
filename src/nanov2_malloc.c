@@ -1127,7 +1127,7 @@ nanov2_free_definite_size(nanozonev2_t *nanozone, void *ptr, size_t size)
 	if (ptr && nanov2_has_valid_signature(ptr)) {
 		nanov2_size_class_t size_class = nanov2_size_class_from_size(size);
 
-		if (malloc_zero_on_free) {
+		if (malloc_zero_policy == MALLOC_ZERO_ON_FREE) {
 			if (size_class != 0) {
 				nanov2_bzero((char *)ptr + sizeof(nanov2_free_slot_t),
 						size - sizeof(nanov2_free_slot_t));
@@ -1157,7 +1157,7 @@ _nanov2_free(nanozonev2_t *nanozone, void *ptr, bool try)
 		size_t size = nanov2_pointer_size_inline(nanozone, ptr, FALSE,
 				&size_class, &block_metap);
 		if (size) {
-			if (malloc_zero_on_free) {
+			if (malloc_zero_policy == MALLOC_ZERO_ON_FREE) {
 				if (size > sizeof(nanov2_free_slot_t)) {
 					nanov2_bzero((char *)ptr + sizeof(nanov2_free_slot_t),
 							size - sizeof(nanov2_free_slot_t));
@@ -1189,6 +1189,51 @@ nanov2_try_free_default(nanozonev2_t *nanozone, void *ptr)
 	_nanov2_free(nanozone, ptr, true);
 }
 
+MALLOC_ALWAYS_INLINE MALLOC_INLINE
+void *
+nanov2_malloc_zero(nanozonev2_t *nanozone, size_t rounded_size)
+{
+	nanov2_block_meta_t *madvise_block_metap = NULL;
+	nanov2_size_class_t size_class = nanov2_size_class_from_size(rounded_size);
+
+	// Get the index of the pointer to the block from which we are should be
+	// allocating. This currently depends on the physical CPU number.
+	int allocation_index = nanov2_get_allocation_block_index();
+
+	// Get the current allocation block meta data pointer. If this is NULL,
+	// we need to find a new allocation block.
+	nanov2_block_meta_t **block_metapp =
+			&nanozone->current_block[size_class][allocation_index];
+	nanov2_block_meta_t *block_metap = os_atomic_load(block_metapp, relaxed);
+	bool corruption = false;
+	void *ptr = NULL;
+	if (block_metap) {
+		// Fast path: we have a block -- try to allocate from it.
+		ptr = nanov2_allocate_from_block_inline(nanozone, block_metap,
+				size_class, &madvise_block_metap, &corruption);
+		if (ptr && !corruption) {
+			if (malloc_zero_policy == MALLOC_ZERO_ON_FREE) {
+				// Always clear the double-free guard so that we can recognize that
+				// this block is not on the free list.
+				nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
+				os_atomic_store(&slotp->double_free_guard, 0, relaxed);
+
+				// We know the body of the allocation is already clear, so we just
+				// need to clean up the next_slot word to get to all-zero.  Do so in
+				// all cases, even if a cleared allocation is not requested, to
+				// prevent any leakage through the next_slot bits.
+				os_atomic_store(&slotp->next_slot, 0, relaxed);
+			} else {
+				nanov2_bzero(ptr, rounded_size);
+			}
+			return ptr;
+		}
+	}
+
+	return nanov2_allocate_outlined(nanozone, block_metapp, rounded_size,
+			size_class, allocation_index, madvise_block_metap, ptr, true);
+}
+
 MALLOC_NOEXPORT void *
 nanov2_calloc(nanozonev2_t *nanozone, size_t num_items, size_t size)
 {
@@ -1198,49 +1243,23 @@ nanov2_calloc(nanozonev2_t *nanozone, size_t num_items, size_t size)
 	}
 	size_t rounded_size = _nano_common_good_size(total_bytes);
 	if (total_bytes <= NANO_MAX_SIZE) {
-		nanov2_block_meta_t *madvise_block_metap = NULL;
-		nanov2_size_class_t size_class = nanov2_size_class_from_size(rounded_size);
-
-		// Get the index of the pointer to the block from which we are should be
-		// allocating. This currently depends on the physical CPU number.
-		int allocation_index = nanov2_get_allocation_block_index();
-
-		// Get the current allocation block meta data pointer. If this is NULL,
-		// we need to find a new allocation block.
-		nanov2_block_meta_t **block_metapp =
-				&nanozone->current_block[size_class][allocation_index];
-		nanov2_block_meta_t *block_metap = os_atomic_load(block_metapp, relaxed);
-		bool corruption = false;
-		void *ptr = NULL;
-		if (block_metap) {
-			// Fast path: we have a block -- try to allocate from it.
-			ptr = nanov2_allocate_from_block_inline(nanozone, block_metap,
-					size_class, &madvise_block_metap, &corruption);
-			if (ptr && !corruption) {
-				if (malloc_zero_on_free) {
-					// Always clear the double-free guard so that we can recognize that
-					// this block is not on the free list.
-					nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
-					os_atomic_store(&slotp->double_free_guard, 0, relaxed);
-
-					// We know the body of the allocation is already clear, so we just
-					// need to clean up the next_slot word to get to all-zero.  Do so in
-					// all cases, even if a cleared allocation is not requested, to
-					// prevent any leakage through the next_slot bits.
-					os_atomic_store(&slotp->next_slot, 0, relaxed);
-				} else {
-					nanov2_bzero(ptr, rounded_size);
-				}
-				return ptr;
-			}
-		}
-
-		return nanov2_allocate_outlined(nanozone, block_metapp, rounded_size,
-				size_class, allocation_index, madvise_block_metap, ptr, true);
+		return nanov2_malloc_zero(nanozone, rounded_size);
 	}
 
 	// Too big for nano, so delegate to the helper zone.
 	return nanozone->helper_zone->calloc(nanozone->helper_zone, 1, total_bytes);
+}
+
+MALLOC_NOEXPORT void *
+nanov2_malloc_zero_on_alloc(nanozonev2_t *nanozone, size_t size)
+{
+	size_t rounded_size = _nano_common_good_size(size);
+	if (rounded_size <= NANO_MAX_SIZE) {
+		return nanov2_malloc_zero(nanozone, rounded_size);
+	}
+
+	// Too big for nano, so delegate to the helper zone.
+	return nanozone->helper_zone->malloc(nanozone->helper_zone, size);
 }
 #endif // OS_VARIANT_RESOLVED
 
@@ -2273,21 +2292,42 @@ nanov2_madvise_block(nanozonev2_t *nanozone, nanov2_block_meta_t *block_metap,
 
 #if OS_VARIANT_NOTRESOLVED
 
-#if NANOV2_MULTIPLE_REGIONS
-static nanov2_addr_t nanov2_max_region_base = {
-	.fields.nano_signature = NANOZONE_SIGNATURE,
-	.fields.nano_region = NANOV2_MAX_REGION_NUMBER
-};
-#endif // NANOV2_MULTIPLE_REGIONS
+// Update protection for region to DEFAULT
+static bool
+nanov2_unprotect_region(nanov2_region_t *region)
+{
+	MALLOC_TRACE(TRACE_nanov2_region_protection | DBG_FUNC_START,
+			(uint64_t)region, 0, 0, 0);
+	bool result = nano_common_unprotect_vm_space((mach_vm_address_t)region,
+			NANOV2_REGION_SIZE);
+	MALLOC_TRACE(TRACE_nanov2_region_protection | DBG_FUNC_END,
+			(uint64_t)region, result, 0, 0);
+	return result;
+}
+
+// Reserve VA at [base, base+num_regions*REGION_SIZE].
+// Note: permissions must still be granted on reserved region with `nanov2_unprotect_region`
+static bool
+nanov2_reserve_regions(nanov2_region_t *base, unsigned int num_regions)
+{
+	MALLOC_TRACE(TRACE_nanov2_region_reservation | DBG_FUNC_START,
+			(uint64_t)base, num_regions, 0, 0);
+	bool result = nano_common_reserve_vm_space((mach_vm_address_t)base,
+			(NANOV2_REGION_SIZE * (mach_vm_size_t)num_regions));
+	MALLOC_TRACE(TRACE_nanov2_region_reservation | DBG_FUNC_END,
+			(uint64_t)base, num_regions, result, 0);
+
+	return result;
+}
 
 // Attempts to allocate VM space for a region at a given address and returns
 // whether the allocation succeeded.
-static boolean_t
+static bool
 nanov2_allocate_region(nanov2_region_t *region)
 {
 	MALLOC_TRACE(TRACE_nanov2_region_allocation | DBG_FUNC_START,
 			(uint64_t)region, 0, 0, 0);
-	boolean_t result = nano_common_allocate_vm_space((mach_vm_address_t)region,
+	bool result = nano_common_allocate_vm_space((mach_vm_address_t)region,
 			NANOV2_REGION_SIZE);
 	MALLOC_TRACE(TRACE_nanov2_region_allocation | DBG_FUNC_END,
 			(uint64_t)region, result, 0, 0);
@@ -2304,11 +2344,26 @@ nanov2_allocate_new_region(nanozonev2_t *nanozone)
 #if NANOV2_MULTIPLE_REGIONS
 	bool allocated = false;
 
+	nanov2_addr_t nanov2_max_region_base = {
+		.fields.nano_signature = NANOZONE_SIGNATURE,
+		.fields.nano_region = nano_max_region,
+	};
+
 	_malloc_lock_assert_owner(&nanozone->regions_lock);
 	nanov2_region_t *current_region = nanov2_current_region_base(
 			os_atomic_load(&nanozone->current_region_next_arena, relaxed));
 	nanov2_region_t *next_region = current_region + 1;
+
 	while ((void *)next_region <= nanov2_max_region_base.addr) {
+#if CONFIG_NANO_RESERVE_REGIONS
+		if (!nanov2_unprotect_region(next_region)) {
+			MALLOC_REPORT_FATAL_ERROR(next_region,
+					"Nano: Unable to raise protection on pre-allocated region");
+		}
+		nanozone->statistics.allocated_regions++;
+		allocated = true;
+		break;
+#else // CONFIG_NANO_RESERVE_REGIONS
 		if (nanov2_allocate_region(next_region)) {
 			nanozone->statistics.allocated_regions++;
 			allocated = true;
@@ -2321,6 +2376,7 @@ nanov2_allocate_new_region(nanozonev2_t *nanozone)
 		// atomically here. Published by the store-release of
 		// current_region_next_arena.
 		os_atomic_inc(&nanozone->statistics.region_address_clashes, relaxed);
+#endif // CONFIG_NANO_RESERVE_REGIONS
 	}
 
 	if (!allocated) {
@@ -2912,7 +2968,8 @@ unlock:
 
 done:
 	if (os_likely(ptr)) {
-		if (malloc_zero_on_free) {
+		switch (malloc_zero_policy) {
+		case MALLOC_ZERO_ON_FREE: {
 			// Always clear the double-free guard so that we can recognize that
 			// this block is not on the free list.
 			nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
@@ -2923,15 +2980,20 @@ done:
 			// all cases, even if a cleared allocation is not requested, to
 			// prevent any leakage through the next_slot bits.
 			os_atomic_store(&slotp->next_slot, 0, relaxed);
-		} else {
-			if (clear) {
-				memset(ptr, '\0', rounded_size);
-			} else {
+			break;
+		}
+		case MALLOC_ZERO_NONE:
+			if (!clear) {
 				// Always clear the double-free guard so that we can recognize that
 				// this block is not on the free list.
 				nanov2_free_slot_t *slotp = (nanov2_free_slot_t *)ptr;
 				os_atomic_store(&slotp->double_free_guard, 0, relaxed);
+				break;
 			}
+			// fall through
+		case MALLOC_ZERO_ON_ALLOC:
+			memset(ptr, '\0', rounded_size);
+			break;
 		}
 	} else {
 		malloc_set_errno_fast(MZ_POSIX, ENOMEM);
@@ -3052,7 +3114,12 @@ nanov2_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags)
 	// Set up the basic_zone portion of the nanozonev2 structure
 	nanozone->basic_zone.version = 13;
 	nanozone->basic_zone.size = OS_RESOLVED_VARIANT_ADDR(nanov2_size);
-	nanozone->basic_zone.malloc = OS_RESOLVED_VARIANT_ADDR(nanov2_malloc);
+	if (malloc_zero_policy == MALLOC_ZERO_ON_ALLOC) {
+		nanozone->basic_zone.malloc =
+				OS_RESOLVED_VARIANT_ADDR(nanov2_malloc_zero_on_alloc);
+	} else {
+		nanozone->basic_zone.malloc = OS_RESOLVED_VARIANT_ADDR(nanov2_malloc);
+	}
 	nanozone->basic_zone.calloc = OS_RESOLVED_VARIANT_ADDR(nanov2_calloc);
 	nanozone->basic_zone.valloc = (void *)nanov2_valloc;
 	nanozone->basic_zone.free = OS_RESOLVED_VARIANT_ADDR(nanov2_free);
@@ -3105,14 +3172,30 @@ nanov2_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags)
 	_malloc_lock_init(&nanozone->madvise_lock);
 
 	// Allocate the initial region. If this does not succeed, we disable Nano.
-	nanov2_addr_t p = {.fields.nano_signature = NANOZONE_SIGNATURE};
-	nanov2_region_t *region = (nanov2_region_t *)p.addr;
-	boolean_t result = nanov2_allocate_region(region);
+	nanov2_region_t *region = (nanov2_region_t *)NANOZONE_BASE_REGION_ADDRESS;
+
+	bool result;
+#if CONFIG_NANO_RESERVE_REGIONS
+	unsigned int num_regions = (nano_max_region + 1);
+	result = nanov2_reserve_regions(region, num_regions);
+	if (result) {
+		result = nanov2_unprotect_region(region);
+		if (!result) {
+			malloc_report(ASL_LEVEL_ERR,
+					"unable to protect initial region\n");
+			nano_common_deallocate_pages((void *)region,
+					num_regions * (size_t)NANOV2_REGION_SIZE, 0);
+		}
+	}
+#else // CONFIG_NANO_RESERVE_REGIONS
+	result = nanov2_allocate_region(region);
+#endif // CONFIG_NANO_RESERVE_REGIONS
 	if (!result) {
-		nano_common_deallocate_pages(nanozone, NANOZONEV2_ZONE_PAGED_SIZE, 0);
+		nano_common_deallocate_pages((void *)nanozone,
+				NANOZONEV2_ZONE_PAGED_SIZE, 0);
 		_malloc_engaged_nano = NANO_NONE;
 		malloc_report(ASL_LEVEL_NOTICE, "nano zone abandoned due to inability "
-				"to preallocate reserved vm space.\n");
+				"to reserve vm space.\n");
 		return NULL;
 	}
 	nanov2_region_linkage_t *region_linkage =
@@ -3124,7 +3207,6 @@ nanov2_create_zone(malloc_zone_t *helper_zone, unsigned debug_flags)
 	os_atomic_store(&nanozone->current_region_next_arena,
 			((nanov2_arena_t *)region) + 1, release);
 	nanozone->statistics.allocated_regions = 1;
-
 	// Set up the guard blocks for the initial arena, if requested
 	nanov2_init_guard_blocks(nanozone, (nanov2_arena_t *)region);
 

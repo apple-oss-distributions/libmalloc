@@ -6,13 +6,16 @@
 //
 
 #include <darwintest.h>
+#include "../src/internal.h"
+
+#if CONFIG_MEDIUM_ALLOCATOR
 
 #include "../src/magazine_medium.c"
 #include "magazine_testing.h"
 
 bool aggressive_madvise_enabled = false;
 uint64_t magazine_medium_madvise_window_scale_factor = 1;
-bool malloc_zero_on_free = MALLOC_ZERO_ON_FREE_ENABLED_DEFAULT;
+malloc_zero_policy_t malloc_zero_policy = MALLOC_ZERO_POLICY_DEFAULT;
 
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
@@ -225,3 +228,13 @@ T_DECL(medium_free_deallocate, "check medium regions deallocate when empty",
 	T_ASSERT_EQ(depot->mag_num_objects, 0, "no objects in depot after last free");
 	T_ASSERT_EQ(depot->num_bytes_in_magazine, 0ul, "no region in depot after last free");
 }
+
+#else // CONFIG_MEDIUM_ALLOCATOR
+
+// binaries are required to contain at least 1 test
+T_DECL(medium_test_skip, "skip medium tests")
+{
+	T_SKIP("MallocMedium not compiled on this platform");
+}
+
+#endif // CONFIG_MEDIUM_ALLOCATOR
