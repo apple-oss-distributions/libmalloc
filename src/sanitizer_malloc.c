@@ -23,7 +23,7 @@
 
 #include "internal.h"
 
-#if CONFIG_QUARANTINE
+#if CONFIG_SANITIZER
 
 #pragma mark -
 #pragma mark Types and Structures
@@ -36,6 +36,7 @@ typedef struct {
 	// Configuration
 	bool debug;
 	bool do_poisoning;
+	size_t redzone_size; // minimum amount of right padding
 	size_t max_items_in_quarantine; // 0 means unlimited
 	size_t max_bytes_in_quarantine; // 0 means unlimited
 
@@ -51,48 +52,50 @@ typedef struct {
 	struct quarantined_chunk *quarantine_tail;
 	size_t items_in_quarantine;
 	size_t bytes_in_quarantine;
-} quarantine_zone_t;
+} sanitizer_zone_t;
 
-MALLOC_STATIC_ASSERT(__offsetof(quarantine_zone_t, malloc_zone) == 0,
-		"quarantine_zone_t instances must be usable as regular zones");
-MALLOC_STATIC_ASSERT(__offsetof(quarantine_zone_t, padding) < PAGE_MAX_SIZE,
+MALLOC_STATIC_ASSERT(__offsetof(sanitizer_zone_t, malloc_zone) == 0,
+		"sanitizer_zone_t instances must be usable as regular zones");
+MALLOC_STATIC_ASSERT(__offsetof(sanitizer_zone_t, padding) < PAGE_MAX_SIZE,
 		"First page is mapped read-only");
-MALLOC_STATIC_ASSERT(__offsetof(quarantine_zone_t, lock) >= PAGE_MAX_SIZE,
+MALLOC_STATIC_ASSERT(__offsetof(sanitizer_zone_t, lock) >= PAGE_MAX_SIZE,
 		"Mutable state is on separate page");
-MALLOC_STATIC_ASSERT(sizeof(quarantine_zone_t) < (2 * PAGE_MAX_SIZE),
+MALLOC_STATIC_ASSERT(sizeof(sanitizer_zone_t) < (2 * PAGE_MAX_SIZE),
 		"Zone fits on 2 pages");
+
+#define ASAN_SHADOW_ALIGNMENT 8
 
 #define DELEGATE(function, args...) \
 	zone->wrapped_zone->function(zone->wrapped_zone, args)
 
 // Lock helpers
 static void
-init_lock(quarantine_zone_t *zone)
+init_lock(sanitizer_zone_t *zone)
 {
 	_malloc_lock_init(&zone->lock);
 }
 
 static void
-lock(quarantine_zone_t *zone)
+lock(sanitizer_zone_t *zone)
 {
 	_malloc_lock_lock(&zone->lock);
 }
 
 static void
-unlock(quarantine_zone_t *zone)
+unlock(sanitizer_zone_t *zone)
 {
 	_malloc_lock_unlock(&zone->lock);
 }
 
 static bool
-trylock(quarantine_zone_t *zone)
+trylock(sanitizer_zone_t *zone)
 {
 	return _malloc_lock_trylock(&zone->lock);
 }
 
 // VM allocation/deallocate helpers
 static vm_address_t
-quarantine_vm_map(size_t size, vm_prot_t protection, int tag)
+sanitizer_vm_map(size_t size, vm_prot_t protection, int tag)
 {
 	vm_map_t target = mach_task_self();
 	mach_vm_address_t address = 0;
@@ -113,7 +116,7 @@ quarantine_vm_map(size_t size, vm_prot_t protection, int tag)
 }
 
 static void
-quarantine_vm_deallocate(vm_address_t addr, size_t size)
+sanitizer_vm_deallocate(vm_address_t addr, size_t size)
 {
 	vm_map_t target = mach_task_self();
 	mach_vm_address_t address = (mach_vm_address_t)addr;
@@ -123,7 +126,7 @@ quarantine_vm_deallocate(vm_address_t addr, size_t size)
 }
 
 static void
-quarantine_vm_protect(vm_address_t addr, size_t size, vm_prot_t protection)
+sanitizer_vm_protect(vm_address_t addr, size_t size, vm_prot_t protection)
 {
 	vm_map_t target = mach_task_self();
 	mach_vm_address_t address = (mach_vm_address_t)addr;
@@ -157,24 +160,6 @@ env_uint(const char *name, uint32_t default_value)
 	return (uint32_t)strtoul(value, NULL, 0);
 }
 
-// Shadow memory helpers
-#define SHADOW_MEMORY_BASE (0x0000200000000000ull)
-#define PTR_TO_SHADOW(p) (void *)((((uintptr_t)ptr) >> 3) + SHADOW_MEMORY_BASE)
-#define ROUND_UP(n, multiple_of) (((n + multiple_of - 1) / multiple_of) * multiple_of)
-#define SIZE_TO_SHADOW_SIZE(p) (ROUND_UP(p, 16) >> 3)
-
-static void
-poison(void *ptr, size_t size)
-{
-	memset(PTR_TO_SHADOW(ptr), 0xff, SIZE_TO_SHADOW_SIZE(size));
-}
-
-static void
-unpoison(void *ptr, size_t size)
-{
-	memset(PTR_TO_SHADOW(ptr), 0x0, SIZE_TO_SHADOW_SIZE(size));
-}
-
 static uint32_t
 stacktrace_depo_insert(struct stacktrace_depo_t *depo, vm_address_t *pcs, size_t count);
 
@@ -184,7 +169,9 @@ pointer_map_find(struct pointer_map_t *map, uintptr_t ptr, uint64_t *word_out);
 static void
 pointer_map_insert(struct pointer_map_t *map, uintptr_t ptr, uint64_t word);
 
-#define countof(a) (sizeof(a) / sizeof(*(a)))
+static void
+unpoison(sanitizer_zone_t *zone, void *ptr, size_t size);
+
 #define wrap(index, container) ((index) & (countof(container) - 1))
 
 static uint32_t OS_ALWAYS_INLINE
@@ -233,7 +220,7 @@ MALLOC_STATIC_ASSERT(sizeof(next_and_size) == 8,
 		"next_and_size must be 8 bytes");
 
 static void OS_NOINLINE
-place_into_quarantine(quarantine_zone_t *zone, void *ptr, size_t size)
+place_into_quarantine(sanitizer_zone_t *zone, void *ptr, size_t size)
 {
 	if (ptr == NULL) {
 		return;
@@ -247,11 +234,14 @@ place_into_quarantine(quarantine_zone_t *zone, void *ptr, size_t size)
 	// Don't quarantine large allocations to avoid one single huge allocation
 	// evicting the whole quarantine.
 	if (size > PAGE_SIZE) {
-		return DELEGATE(free, ptr);
-	}
+		// Actually unpoison before handing back to the allocator. This is not
+		// always strictly necessary, but only when executing under memory
+		// instrumentation that may check the shadow map for us
+		if (zone->do_poisoning) {
+			unpoison(zone, ptr, size);
+		}
 
-	if (zone->do_poisoning) {
-		poison(ptr, size);
+		return DELEGATE(free, ptr);
 	}
 
 	uint32_t dealloc_stack_hash = insert_current_stacktrace_into_depo(zone->depo, 2);
@@ -325,10 +315,13 @@ place_into_quarantine(quarantine_zone_t *zone, void *ptr, size_t size)
 		quarantined_chunk_t *next = (void *)n.parts.next_ptr;
 		size_t iterator_size = n.parts.size;
 
-		if (zone->do_poisoning) {
-			unpoison(iterator, iterator_size);
-		}
 		if (zone->debug) malloc_report(ASL_LEVEL_INFO, "evicting %p from quarantine, size = 0x%lx\n", iterator, iterator_size);
+
+		// Same as above, perform actual unpoisoning
+		if (zone->do_poisoning) {
+			unpoison(zone, iterator, iterator_size);
+		}
+
 		DELEGATE(free_definite_size, iterator, iterator_size);
 
 		iterator = next;
@@ -414,7 +407,7 @@ murmur2_hash_backtrace(uintptr_t *pcs, size_t count)
 //   stacktrace. Should be rare enough with a good hashing algorithm, and it's
 //   fine given we store stacktraces only for diagnostic purposes.
 //
-// The quarantine zone captures alloc and dealloc stack traces and saves them
+// The sanitizer zone captures alloc and dealloc stack traces and saves them
 // into the depo. The handles/hashes are then stored elsewhere (in pointer_map
 // for live allocations, and in quarantine_chunk_t for quarantined ones).
 
@@ -568,114 +561,318 @@ pointer_map_find(pointer_map_t *map, uintptr_t ptr, uint64_t *word_out)
 	return true;
 }
 
+#pragma mark -
+#pragma mark Poisoning Functions
+
+static size_t get_redzone_size(sanitizer_zone_t *zone, const void *ptr, size_t size)
+{
+	MALLOC_ASSERT(zone->do_poisoning);
+	// Size of redzone is stored in the last aligned size_t at the end of the allocation
+	const size_t offset = sizeof(size_t) + size % sizeof(size_t);
+	const size_t *redzone_size_ptr = (size_t *)((uintptr_t)ptr + size - offset);
+	// When executing under instrumentation, the translation layer automatically
+	// checks against the shadow map, instead of letting the compiled program's
+	// instrumentation handle it. This means we need to bypass it since the size
+	// is stored within the allocation redzone
+	const size_t redzone_size = _malloc_read_uint64_via_rsp(redzone_size_ptr);
+	MALLOC_ASSERT(redzone_size >= zone->redzone_size && redzone_size < size);
+	return redzone_size;
+}
+
+static void set_redzone_size(sanitizer_zone_t *zone, void *ptr, size_t size, size_t redzone_size)
+{
+	MALLOC_ASSERT(zone->do_poisoning);
+	const size_t offset = sizeof(size_t) + size % sizeof(size_t);
+	MALLOC_ASSERT(redzone_size < size);
+	size_t *redzone_size_ptr = (size_t *)((uintptr_t)ptr + size - offset);
+	// Same as above, this may be a reallocation that has not yet been unpoisoned
+	_malloc_write_uint64_via_rsp(redzone_size_ptr, redzone_size);
+}
+
+static void poison_alloc(sanitizer_zone_t *zone, void *ptr, size_t size, size_t redzone_size)
+{
+	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "poison_alloc(%p, 0x%lx, 0x%lx)\n", ptr, size, redzone_size);
+
+	if (!ptr) {
+		return;
+	}
+
+	// Always set the redzone size, even if we can't actually poison allocations
+	set_redzone_size(zone, ptr, size + redzone_size, redzone_size);
+
+	const struct malloc_sanitizer_poison *sanitizer = malloc_sanitizer_get_functions();
+	if (sanitizer && sanitizer->heap_allocate_poison) {
+		(*sanitizer->heap_allocate_poison)((uintptr_t)ptr, 0, size, redzone_size);
+	} else if (zone->debug) {
+		malloc_report(ASL_LEVEL_WARNING, "MallocSanitizerZone: Not poisoning allocation %p of size %lu with redzone size %lu due to missing pointers!\n", ptr, size, redzone_size);
+	}
+}
+
+static void poison_free(sanitizer_zone_t *zone, void *ptr, size_t size)
+{
+	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "poison_free(%p, 0x%lx)\n", ptr, size);
+
+	MALLOC_ASSERT(ptr);
+
+	const struct malloc_sanitizer_poison *sanitizer = malloc_sanitizer_get_functions();
+	if (sanitizer && sanitizer->heap_deallocate_poison) {
+		(*sanitizer->heap_deallocate_poison)((uintptr_t)ptr, size);
+	} else if (zone->debug) {
+		malloc_report(ASL_LEVEL_WARNING, "MallocSanitizerZone: Not poisoning deallocation %p of size %lu due to missing pointers!\n", ptr, size);
+	}
+}
+
+static void unpoison(sanitizer_zone_t *zone, void *ptr, size_t size)
+{
+	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "unpoison(%p, 0x%lx)\n", ptr, size);
+
+	MALLOC_ASSERT(ptr);
+
+	const struct malloc_sanitizer_poison *sanitizer = malloc_sanitizer_get_functions();
+	if (sanitizer && sanitizer->heap_allocate_poison) {
+		(*sanitizer->heap_allocate_poison)((uintptr_t)ptr, 0, size, 0);
+	} else if (zone->debug) {
+		malloc_report(ASL_LEVEL_WARNING, "MallocSanitizerZone: Not unpoisoning %p of size %lu due to missing pointers!\n", ptr, size);
+	}
+}
 
 #pragma mark -
 #pragma mark Zone Functions
 
 static size_t
-quarantine_size(quarantine_zone_t *zone, const void *ptr)
+sanitizer_size(sanitizer_zone_t *zone, const void *ptr)
 {
-	return DELEGATE(size, ptr);
+	size_t size = DELEGATE(size, ptr);
+	if (zone->do_poisoning) {
+		const size_t redzone_size = get_redzone_size(zone, ptr, size);
+		if (zone->debug) malloc_report(ASL_LEVEL_INFO, "size(%p) = 0x%lx - redzone 0x%lx\n", ptr, size, redzone_size);
+
+		MALLOC_ASSERT(size > redzone_size);
+		size -= redzone_size;
+	} else {
+		if (zone->debug) malloc_report(ASL_LEVEL_INFO, "size(%p) = 0x%lx\n", ptr, size);
+	}
+	return size;
 }
 
 static void *
-quarantine_malloc(quarantine_zone_t *zone, size_t size)
+sanitizer_malloc(sanitizer_zone_t *zone, size_t size)
 {
+	size_t redzone_size = zone->redzone_size;
+	const size_t usr_size = size;
+	if (zone->do_poisoning) {
+		// Round up redzone so that allocation is padded to shadow alignment
+		redzone_size += ASAN_SHADOW_ALIGNMENT - (usr_size & (ASAN_SHADOW_ALIGNMENT - 1));
+		// Round up redzone so that allocation includes allocator padding
+		const size_t padded_sz = DELEGATE(introspect->good_size, usr_size + redzone_size);
+		MALLOC_ASSERT(padded_sz >= usr_size + redzone_size);
+		redzone_size += padded_sz - (usr_size + redzone_size);
+		// Recalculate the total allocation size
+		size = usr_size + redzone_size;
+		// Check for overflow once at the end
+		if (size < usr_size) {
+			return NULL;
+		}
+	}
 	void *ptr = DELEGATE(malloc, size);
-	record_alloc_stacktrace(zone->depo, zone->map, ptr, size);
+	record_alloc_stacktrace(zone->depo, zone->map, ptr, usr_size);
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "malloc(0x%lx) = %p\n", size, ptr);
+	if (zone->do_poisoning) {
+		poison_alloc(zone, ptr, usr_size, redzone_size);
+	}
 	return ptr;
 }
 
 static void *
-quarantine_calloc(quarantine_zone_t *zone, size_t num_items, size_t size)
+sanitizer_calloc(sanitizer_zone_t *zone, size_t num_items, size_t size)
 {
+	size_t usr_size;
+	if (calloc_get_size(num_items, size, 0, &usr_size)) {
+		return NULL;
+	}
+
+	size_t redzone_size = zone->redzone_size;
+	if (zone->do_poisoning) {
+		// Round up redzone so that allocation is padded to shadow alignment
+		redzone_size += ASAN_SHADOW_ALIGNMENT - (usr_size & (ASAN_SHADOW_ALIGNMENT - 1));
+		// Round up redzone so that allocation includes allocator padding
+		const size_t padded_sz = DELEGATE(introspect->good_size, usr_size + redzone_size);
+		MALLOC_ASSERT(padded_sz >= usr_size + redzone_size);
+		redzone_size += padded_sz - (usr_size + redzone_size);
+		// Recalculate the total allocation size
+		num_items = 1;
+		size = usr_size + redzone_size;
+		// Check for overflow once at the end
+		if (size < usr_size) {
+			return NULL;
+		}
+	}
 	void *ptr = DELEGATE(calloc, num_items, size);
-	record_alloc_stacktrace(zone->depo, zone->map, ptr, num_items * size);
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "calloc(0x%lx, 0x%lx) = %p\n", num_items, size, ptr);
+	record_alloc_stacktrace(zone->depo, zone->map, ptr, usr_size);
+	if (zone->do_poisoning) {
+		poison_alloc(zone, ptr, usr_size, redzone_size);
+	}
 	return ptr;
 }
 
 static void *
-quarantine_valloc(quarantine_zone_t *zone, size_t size)
+sanitizer_valloc(sanitizer_zone_t *zone, size_t size)
 {
+	size_t redzone_size = zone->redzone_size;
+	const size_t usr_size = size;
+	if (zone->do_poisoning) {
+		// Round up redzone so that allocation is padded to shadow alignment
+		redzone_size += ASAN_SHADOW_ALIGNMENT - (usr_size & (ASAN_SHADOW_ALIGNMENT - 1));
+		// Recalculate the total allocation size
+		size = usr_size + redzone_size;
+		// Check for overflow once at the end
+		if (size < usr_size) {
+			return NULL;
+		}
+	}
 	void *ptr = DELEGATE(valloc, size);
-	record_alloc_stacktrace(zone->depo, zone->map, ptr, size);
+	record_alloc_stacktrace(zone->depo, zone->map, ptr, usr_size);
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "valloc(0x%lx) = %p\n", size, ptr);
+	if (zone->do_poisoning) {
+		// Recalculate the redzone size due to allocator padding
+		size = DELEGATE(size, ptr);
+		MALLOC_ASSERT(size >= usr_size && size - usr_size >= redzone_size);
+		redzone_size = size - usr_size;
+		poison_alloc(zone, ptr, usr_size, redzone_size);
+	}
 	return ptr;
 }
 
 static void
-quarantine_free(quarantine_zone_t *zone, void *ptr)
+sanitizer_free(sanitizer_zone_t *zone, void *ptr)
 {
+	size_t size = 0;
+	if (zone->do_poisoning) {
+		size = DELEGATE(size, ptr);
+		poison_free(zone, ptr, size);
+	}
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "free(%p)\n", ptr);
-	place_into_quarantine(zone, ptr, 0);
+	place_into_quarantine(zone, ptr, size);
 }
 
 static void *
-quarantine_realloc(quarantine_zone_t *zone, void *ptr, size_t new_size)
+sanitizer_realloc(sanitizer_zone_t *zone, void *ptr, size_t new_size)
 {
-	if (ptr == NULL) {
-		void *new_ptr = DELEGATE(malloc, new_size);
-		record_alloc_stacktrace(zone->depo, zone->map, new_ptr, new_size);
-		if (zone->debug) malloc_report(ASL_LEVEL_INFO, "realloc(NULL, 0x%lx) = %p\n", new_size, new_ptr);
-		return new_ptr;
-	}
-
 	if (new_size == 0) {
 		new_size = 1;
 	}
 
-	size_t old_size = DELEGATE(size, ptr);
-	void *new_ptr = DELEGATE(malloc, new_size);
-	record_alloc_stacktrace(zone->depo, zone->map, new_ptr, new_size);
-	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "realloc(%p, 0x%lx) = %p (old_size = 0x%lx)\n", ptr, new_size, new_ptr, old_size);
-
-	// Don't free/quarantine the old pointer if allocation failed. Per man page:
-	// > For realloc(), the input pointer is still valid if reallocation failed.
-	if (new_ptr == NULL) {
-		return NULL;
+	size_t redzone_size = zone->redzone_size;
+	const size_t usr_new_size = new_size;
+	if (zone->do_poisoning) {
+		// Round up redzone so that allocation is padded to shadow alignment
+		redzone_size += ASAN_SHADOW_ALIGNMENT - (new_size & (ASAN_SHADOW_ALIGNMENT - 1));
+		// Round up redzone so that allocation includes allocator padding
+		const size_t padded_sz = DELEGATE(introspect->good_size, new_size + redzone_size);
+		MALLOC_ASSERT(padded_sz >= new_size + redzone_size);
+		redzone_size += padded_sz - (new_size + redzone_size);
+		// Recalculate the total allocation size
+		new_size = usr_new_size + redzone_size;
+		// Check for overflow once at the end
+		if (new_size < usr_new_size) {
+			return NULL;
+		}
 	}
 
-	memcpy(new_ptr, ptr, MIN(old_size, new_size));
-	place_into_quarantine(zone, ptr, old_size);
+	void *new_ptr = DELEGATE(malloc, new_size);
+	record_alloc_stacktrace(zone->depo, zone->map, new_ptr, usr_new_size);
+	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "realloc(%p, 0x%lx) = %p\n", ptr, new_size, new_ptr);
+
+	if (ptr != NULL) {
+		size_t old_redzone_size = 0;
+		const size_t old_size = DELEGATE(size, ptr);
+		if (zone->do_poisoning) {
+			old_redzone_size = get_redzone_size(zone, ptr, old_size);
+			MALLOC_ASSERT(old_size > old_redzone_size);
+		}
+
+		if (zone->debug) malloc_report(ASL_LEVEL_INFO, "realloc(%p, 0x%lx): size(%p) = 0x%lx - redzone 0x%lx)\n", ptr, new_size, ptr, old_size, old_redzone_size);
+
+		// Don't free/quarantine the old pointer if allocation failed. Per man page:
+		// > For realloc(), the input pointer is still valid if reallocation failed.
+		if (new_ptr == NULL) {
+			return NULL;
+		}
+
+		const size_t usr_old_size = old_size - old_redzone_size;
+		memcpy(new_ptr, ptr, MIN(usr_old_size, usr_new_size));
+		if (zone->do_poisoning) {
+			poison_free(zone, ptr, old_size);
+		}
+		place_into_quarantine(zone, ptr, old_size);
+	}
+
+	if (zone->do_poisoning) {
+		poison_alloc(zone, new_ptr, usr_new_size, redzone_size);
+	}
 	return new_ptr;
 }
 
 static void
-quarantine_destroy(quarantine_zone_t *zone)
+sanitizer_destroy(sanitizer_zone_t *zone)
 {
 	stacktrace_depo_destroy(zone->depo);
 	pointer_map_destroy(zone->map);
 	malloc_destroy_zone(zone->wrapped_zone);
-	quarantine_vm_deallocate((vm_address_t)zone, sizeof(quarantine_zone_t));
+	sanitizer_vm_deallocate((vm_address_t)zone, sizeof(sanitizer_zone_t));
 }
 
 static void *
-quarantine_memalign(quarantine_zone_t *zone, size_t alignment, size_t size)
+sanitizer_memalign(sanitizer_zone_t *zone, size_t alignment, size_t size)
 {
+	size_t redzone_size = zone->redzone_size;
+	const size_t usr_size = size;
+	if (zone->do_poisoning) {
+		// Round up redzone so that allocation is padded to shadow alignment
+		const size_t padded_sz = roundup(usr_size + redzone_size, ASAN_SHADOW_ALIGNMENT);
+		redzone_size += padded_sz - (usr_size + redzone_size);
+		// Recalculate the total allocation size
+		size = usr_size + redzone_size;
+		// Check for overflow once at the end
+		if (size < usr_size) {
+			return NULL;
+		}
+	}
 	void *ptr = DELEGATE(memalign, alignment, size);
-	record_alloc_stacktrace(zone->depo, zone->map, ptr, size);
+	record_alloc_stacktrace(zone->depo, zone->map, ptr, usr_size);
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "memalign(0x%lx, 0x%lx)\n", alignment, size);
+	if (zone->do_poisoning) {
+		// Recalculate the redzone size due to allocator padding
+		size = DELEGATE(size, ptr);
+		MALLOC_ASSERT(size >= usr_size && size - usr_size >= redzone_size);
+		redzone_size = size - usr_size;
+		poison_alloc(zone, ptr, usr_size, redzone_size);
+	}
 	return ptr;
 }
 
 static void
-quarantine_free_definite_size(quarantine_zone_t *zone, void *ptr, size_t size)
+sanitizer_free_definite_size(sanitizer_zone_t *zone, void *ptr, size_t size)
 {
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "free_definite_size(%p, 0x%lx)\n", ptr, size);
+	if (zone->do_poisoning) {
+		// Provided size is the user accessible size, but we need the total size
+		size = DELEGATE(size, ptr);
+		poison_free(zone, ptr, size);
+	}
 	place_into_quarantine(zone, ptr, size);
 }
 
 static unsigned
-quarantine_batch_malloc(quarantine_zone_t *zone, size_t size, void **results, unsigned count)
+sanitizer_batch_malloc(sanitizer_zone_t *zone, size_t size, void **results, unsigned count)
 {
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "batch_malloc(0x%lx, %p, 0x%x)\n", size, results, count);
 	return 0;
 }
 
 static void
-quarantine_batch_free(quarantine_zone_t *zone, void **to_be_freed, unsigned count)
+sanitizer_batch_free(sanitizer_zone_t *zone, void **to_be_freed, unsigned count)
 {
 	if (zone->debug) malloc_report(ASL_LEVEL_INFO, "batch_free(%p, 0x%x)\n", to_be_freed, count);
 	for (long i = 0; i < count; i++) {
@@ -684,13 +881,13 @@ quarantine_batch_free(quarantine_zone_t *zone, void **to_be_freed, unsigned coun
 }
 
 static size_t
-quarantine_pressure_relief(quarantine_zone_t *zone, size_t goal)
+sanitizer_pressure_relief(sanitizer_zone_t *zone, size_t goal)
 {
 	return DELEGATE(pressure_relief, goal);
 }
 
 static bool
-quarantine_claimed_address(quarantine_zone_t *zone, void *ptr)
+sanitizer_claimed_address(sanitizer_zone_t *zone, void *ptr)
 {
 	return DELEGATE(claimed_address, ptr);
 }
@@ -699,69 +896,69 @@ quarantine_claimed_address(quarantine_zone_t *zone, void *ptr)
 #pragma mark Introspection Functions
 
 static kern_return_t
-quarantine_enumerator(task_t task, void *context, unsigned type_mask, vm_address_t zone_address, memory_reader_t reader, vm_range_recorder_t recorder)
+sanitizer_enumerator(task_t task, void *context, unsigned type_mask, vm_address_t zone_address, memory_reader_t reader, vm_range_recorder_t recorder)
 {
 	return KERN_NOT_SUPPORTED;
 }
 
 static void
-quarantine_statistics(quarantine_zone_t *zone, malloc_statistics_t *stats)
+sanitizer_statistics(sanitizer_zone_t *zone, malloc_statistics_t *stats)
 {
 }
 
 static kern_return_t
-quarantine_statistics_task(task_t task, vm_address_t zone_address, memory_reader_t reader, malloc_statistics_t *stats)
+sanitizer_statistics_task(task_t task, vm_address_t zone_address, memory_reader_t reader, malloc_statistics_t *stats)
 {
 	return KERN_NOT_SUPPORTED;
 }
 
 static void
-quarantine_print(quarantine_zone_t *zone, bool verbose)
+sanitizer_print(sanitizer_zone_t *zone, bool verbose)
 {
 }
 
 static void
-quarantine_print_task(task_t task, unsigned level, vm_address_t zone_address, memory_reader_t reader, print_task_printer_t printer)
+sanitizer_print_task(task_t task, unsigned level, vm_address_t zone_address, memory_reader_t reader, print_task_printer_t printer)
 {
 }
 
 static void
-quarantine_log(quarantine_zone_t *zone, void *address)
+sanitizer_log(sanitizer_zone_t *zone, void *address)
 {
 }
 
 static size_t
-quarantine_good_size(quarantine_zone_t *zone, size_t size)
+sanitizer_good_size(sanitizer_zone_t *zone, size_t size)
 {
 	return DELEGATE(introspect->good_size, size);
 }
 
 static bool
-quarantine_check(quarantine_zone_t *zone)
+sanitizer_check(sanitizer_zone_t *zone)
 {
 	return true; // Zone is always in a consistent state.
 }
 
 static void
-quarantine_force_lock(quarantine_zone_t *zone)
+sanitizer_force_lock(sanitizer_zone_t *zone)
 {
 	lock(zone);
 }
 
 static void
-quarantine_force_unlock(quarantine_zone_t *zone)
+sanitizer_force_unlock(sanitizer_zone_t *zone)
 {
 	unlock(zone);
 }
 
 static void
-quarantine_reinit_lock(quarantine_zone_t *zone)
+sanitizer_reinit_lock(sanitizer_zone_t *zone)
 {
 	init_lock(zone);
 }
 
 static bool
-quarantine_zone_locked(quarantine_zone_t *zone)
+sanitizer_zone_locked(sanitizer_zone_t *zone)
 {
 	bool lock_taken = trylock(zone);
 	if (lock_taken) {
@@ -809,13 +1006,13 @@ pointer_recorder(task_t task, void *context, unsigned type, vm_range_t *ranges, 
 }
 
 kern_return_t
-quarantine_diagnose_fault_from_crash_reporter(vm_address_t fault_address, quarantine_report_t *report,
+sanitizer_diagnose_fault_from_crash_reporter(vm_address_t fault_address, sanitizer_report_t *report,
 		task_t task, vm_address_t zone_address, crash_reporter_memory_reader_t crm_reader)
 {
 	_malloc_lock_lock(&crash_reporter_lock);
 
 	#define COPY_FROM_REMOTE(p, type) crm_reader(task, (vm_address_t)p, sizeof(type))
-	quarantine_zone_t *remote_zone = COPY_FROM_REMOTE(zone_address, quarantine_zone_t);
+	sanitizer_zone_t *remote_zone = COPY_FROM_REMOTE(zone_address, sanitizer_zone_t);
 	pointer_map_t *remote_pointer_map = COPY_FROM_REMOTE(remote_zone->map, pointer_map_t);
 	stacktrace_depo_t *remote_depo = COPY_FROM_REMOTE(remote_zone->depo, stacktrace_depo_t);
 
@@ -874,28 +1071,28 @@ quarantine_diagnose_fault_from_crash_reporter(vm_address_t fault_address, quaran
 // Suppress warning: incompatible function pointer types
 #define FN_PTR(fn) (void *)(&fn)
 
-static malloc_introspection_t quarantine_zone_introspect_template = {
+static malloc_introspection_t sanitizer_zone_introspect_template = {
 	// Block and region enumeration
-	.enumerator = FN_PTR(quarantine_enumerator),
+	.enumerator = FN_PTR(sanitizer_enumerator),
 
 	// Statistics
-	.statistics = FN_PTR(quarantine_statistics),
-	.task_statistics = FN_PTR(quarantine_statistics_task),
+	.statistics = FN_PTR(sanitizer_statistics),
+	.task_statistics = FN_PTR(sanitizer_statistics_task),
 
 	// Logging
-	.print = FN_PTR(quarantine_print),
-	.print_task = FN_PTR(quarantine_print_task),
-	.log = FN_PTR(quarantine_log),
+	.print = FN_PTR(sanitizer_print),
+	.print_task = FN_PTR(sanitizer_print_task),
+	.log = FN_PTR(sanitizer_log),
 
 	// Queries
-	.good_size = FN_PTR(quarantine_good_size),
-	.check = FN_PTR(quarantine_check),
+	.good_size = FN_PTR(sanitizer_good_size),
+	.check = FN_PTR(sanitizer_check),
 
 	// Locking
-	.force_lock = FN_PTR(quarantine_force_lock),
-	.force_unlock = FN_PTR(quarantine_force_unlock),
-	.reinit_lock = FN_PTR(quarantine_reinit_lock),
-	.zone_locked = FN_PTR(quarantine_zone_locked),
+	.force_lock = FN_PTR(sanitizer_force_lock),
+	.force_unlock = FN_PTR(sanitizer_force_unlock),
+	.reinit_lock = FN_PTR(sanitizer_reinit_lock),
+	.zone_locked = FN_PTR(sanitizer_zone_locked),
 
 	// Discharge checking
 	.enable_discharge_checking = NULL,
@@ -914,28 +1111,28 @@ static const malloc_zone_t malloc_zone_template = {
 	.reserved2 = NULL,
 
 	// Standard operations
-	.size = FN_PTR(quarantine_size),
-	.malloc = FN_PTR(quarantine_malloc),
-	.calloc = FN_PTR(quarantine_calloc),
-	.valloc = FN_PTR(quarantine_valloc),
-	.free = FN_PTR(quarantine_free),
-	.realloc = FN_PTR(quarantine_realloc),
-	.destroy = FN_PTR(quarantine_destroy),
+	.size = FN_PTR(sanitizer_size),
+	.malloc = FN_PTR(sanitizer_malloc),
+	.calloc = FN_PTR(sanitizer_calloc),
+	.valloc = FN_PTR(sanitizer_valloc),
+	.free = FN_PTR(sanitizer_free),
+	.realloc = FN_PTR(sanitizer_realloc),
+	.destroy = FN_PTR(sanitizer_destroy),
 
 	// Batch operations
-	.batch_malloc = FN_PTR(quarantine_batch_malloc),
-	.batch_free = FN_PTR(quarantine_batch_free),
+	.batch_malloc = FN_PTR(sanitizer_batch_malloc),
+	.batch_free = FN_PTR(sanitizer_batch_free),
 
 	// Introspection
-	.zone_name = "QuarantineMallocZone",
+	.zone_name = "SanitizerMallocZone",
 	.version = 12,
-	.introspect = &quarantine_zone_introspect_template,
+	.introspect = &sanitizer_zone_introspect_template,
 
 	// Specialized operations
-	.memalign = FN_PTR(quarantine_memalign),
-	.free_definite_size = FN_PTR(quarantine_free_definite_size),
-	.pressure_relief = FN_PTR(quarantine_pressure_relief),
-	.claimed_address = FN_PTR(quarantine_claimed_address)
+	.memalign = FN_PTR(sanitizer_memalign),
+	.free_definite_size = FN_PTR(sanitizer_free_definite_size),
+	.pressure_relief = FN_PTR(sanitizer_pressure_relief),
+	.claimed_address = FN_PTR(sanitizer_claimed_address)
 };
 
 
@@ -943,33 +1140,40 @@ static const malloc_zone_t malloc_zone_template = {
 #pragma mark Zone Configuration & Creation
 
 bool
-quarantine_should_enable(void)
+sanitizer_should_enable(void)
 {
-	return env_bool("MallocQuarantineZone");
+	return env_bool("MallocSanitizerZone") || env_bool("MallocQuarantineZone");
 }
 
 void
-quarantine_reset_environment(void)
+sanitizer_reset_environment(void)
 {
-	// Unset MallocQuarantineZone from the environment to avoid propagating it
+	// Unset MallocSanitizerZone from the environment to avoid propagating it
 	// to any child processes (posix_spawn, exec, fork).
+	unsetenv("MallocSanitizerZone");
 	unsetenv("MallocQuarantineZone");
 }
 
 malloc_zone_t *
-quarantine_create_zone(malloc_zone_t *wrapped_zone)
+sanitizer_create_zone(malloc_zone_t *wrapped_zone)
 {
-	quarantine_zone_t *zone = (quarantine_zone_t *)quarantine_vm_map(sizeof(quarantine_zone_t),
+	sanitizer_zone_t *zone = (sanitizer_zone_t *)sanitizer_vm_map(sizeof(sanitizer_zone_t),
 		VM_PROT_READ | VM_PROT_WRITE, VM_MEMORY_MALLOC);
 	zone->malloc_zone = malloc_zone_template;
 
 	// Since we are calling szone_introspect.enumerator directly, see
-	// quarantine_diagnose_fault_from_crash_reporter.
+	// sanitizer_diagnose_fault_from_crash_reporter.
 	MALLOC_ASSERT(wrapped_zone->introspect == &szone_introspect);
 	zone->wrapped_zone = wrapped_zone;
 
-	zone->debug = env_bool("MallocQuarantineZoneDebug");
-	zone->do_poisoning = !env_bool("MallocQuarantineNoPoisoning");
+	zone->debug = env_bool("MallocSanitizerZoneDebug");
+#if TARGET_OS_EXCLAVECORE || TARGET_OS_EXCLAVEKIT
+	zone->do_poisoning = true;
+#else
+	zone->do_poisoning = !env_bool("MallocSanitizerNoPoisoning");
+#endif
+	zone->redzone_size = env_uint("MallocSanitizerRedzoneSize", 16); // default is 16 bytes
+	MALLOC_ASSERT((zone->redzone_size % ASAN_SHADOW_ALIGNMENT) == 0);
 	zone->max_items_in_quarantine = env_uint("MallocQuarantineMaxItems", 0); // default is 0 = unlimited
 	zone->max_bytes_in_quarantine = (size_t)env_uint("MallocQuarantineMaxSizeInMB", 256) << 20; // 256 MB is default
 
@@ -978,17 +1182,17 @@ quarantine_create_zone(malloc_zone_t *wrapped_zone)
 
 	// Init mutable state
 	init_lock(zone);
-	quarantine_vm_protect((vm_address_t)zone, PAGE_MAX_SIZE, VM_PROT_READ);
+	sanitizer_vm_protect((vm_address_t)zone, PAGE_MAX_SIZE, VM_PROT_READ);
 	return (malloc_zone_t *)zone;
 }
 
-#else // CONFIG_QUARANTINE
+#else // CONFIG_SANITIZER
 
 kern_return_t
-quarantine_diagnose_fault_from_crash_reporter(vm_address_t fault_address, quarantine_report_t *report,
+sanitizer_diagnose_fault_from_crash_reporter(vm_address_t fault_address, sanitizer_report_t *report,
 		task_t task, vm_address_t zone_address, crash_reporter_memory_reader_t crm_reader)
 {
 	return KERN_NOT_SUPPORTED;
 }
 
-#endif // CONFIG_QUARANTINE
+#endif // CONFIG_SANITIZER

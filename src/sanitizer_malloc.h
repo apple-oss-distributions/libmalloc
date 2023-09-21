@@ -21,8 +21,8 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#ifndef _QUARANTINE_MALLOC_H_
-#define _QUARANTINE_MALLOC_H_
+#ifndef _SANITIZER_MALLOC_H_
+#define _SANITIZER_MALLOC_H_
 
 #include "base.h"
 #include "malloc/malloc.h"
@@ -30,18 +30,18 @@
 
 MALLOC_NOEXPORT
 bool
-quarantine_should_enable(void);
+sanitizer_should_enable(void);
 
 MALLOC_NOEXPORT
 void
-quarantine_reset_environment(void);
+sanitizer_reset_environment(void);
 
 MALLOC_NOEXPORT
 malloc_zone_t *
-quarantine_create_zone(malloc_zone_t *wrapped_zone);
+sanitizer_create_zone(malloc_zone_t *wrapped_zone);
 
 static inline uint16_t
-_malloc_read_uint16_via_rsp(void *ptr)
+_malloc_read_uint16_via_rsp(const void *ptr)
 {
 #if TARGET_CPU_X86_64
     __asm__ (
@@ -52,7 +52,7 @@ _malloc_read_uint16_via_rsp(void *ptr)
         :                       // clobbers, empty
     );
     return (uint16_t)(uintptr_t)ptr;
-#elif TARGET_CPU_ARM64
+#elif TARGET_CPU_ARM64 && TARGET_RT_64_BIT
 	__asm__ (
 		"sub  %0, %0, fp    \n"
 		"ldrh %w0, [fp, %0] \n"
@@ -67,7 +67,7 @@ _malloc_read_uint16_via_rsp(void *ptr)
 }
 
 static inline uint64_t
-_malloc_read_uint64_via_rsp(void *ptr)
+_malloc_read_uint64_via_rsp(const void *ptr)
 {
 #if TARGET_CPU_X86_64
     __asm__ (
@@ -78,7 +78,7 @@ _malloc_read_uint64_via_rsp(void *ptr)
         :                       // clobbers, empty
     );
     return (uint64_t)ptr;
-#elif TARGET_CPU_ARM64
+#elif TARGET_CPU_ARM64 && TARGET_RT_64_BIT
 	__asm__ (
 		"sub %0, %0, fp  \n"
 		"ldr %0, [fp, %0]\n"
@@ -103,7 +103,7 @@ _malloc_write_uint64_via_rsp(void *ptr, uint64_t value)
         : "r" (ptr), "r" (value)  // inputs, ptr = %0, value = %1
         :                         // clobbers, empty
     );
-#elif TARGET_CPU_ARM64
+#elif TARGET_CPU_ARM64 && TARGET_RT_64_BIT
 	__asm__ volatile (
 		"sub %0, %0, fp   \n"
 		"str %1, [fp, %0] \n"
@@ -116,4 +116,4 @@ _malloc_write_uint64_via_rsp(void *ptr, uint64_t value)
 #endif
 }
 
-#endif // _QUARANTINE_MALLOC_H_
+#endif // _SANITIZER_MALLOC_H_
