@@ -69,7 +69,7 @@
 
 static_assert(CHAR_BIT == 8, "CHAR_BIT is 8");
 static_assert(powerof2(MFM_ALLOC_SIZE_MAX), "MFM_ALLOC_SIZE_MAX is a power of 2");
-static_assert(powerof2(MFM_BLOCK_SIZE_MAX), "MFM_ALLOC_SIZE_MAX is a power of 2");
+static_assert(powerof2(MFM_BLOCK_SIZE_MAX), "MFM_BLOCK_SIZE_MAX is a power of 2");
 
 #if !MALLOC_TARGET_EXCLAVES
 #define MFM_INTERNAL_CRASH(code, msg)  ({ \
@@ -109,9 +109,9 @@ struct mfm_header {
 	size_t                  mfm_bump_hwm;
 	size_t                  mfm_alloc_count;
 	struct mfm_block        mfm_freelist[MFM_SIZE_CLASSES];
-#if MALLOC_TARGET_EXCLAVES
+#if MALLOC_TARGET_EXCLAVES || MALLOC_TARGET_EXCLAVES_INTROSPECTOR
 	plat_map_t              mfm_map;
-#endif // MALLOC_TARGET_EXCLAVES
+#endif // MALLOC_TARGET_EXCLAVES || MALLOC_TARGET_EXCLAVES_INTROSPECTOR
 };
 
 struct mfm_arena {
@@ -157,7 +157,6 @@ static_assert(sizeof(struct mfm_arena) == MFM_ARENA_SIZE, "I can do math");
 #define mfmh_freelist       mfm_header.mfm_freelist
 
 static struct mfm_arena    *mfm_arena;
-
 
 #pragma mark validation and helper functions
 
@@ -531,6 +530,7 @@ __mfm_block_set_next(struct mfm_block *blk, uint64_t next)
 #endif
 }
 
+
 /*!
  * @function __mfm_block_insert_head()
  *
@@ -544,15 +544,18 @@ __mfm_block_insert_head(
 	struct mfm_block       *blk)
 {
 	uint64_t head, offs, next;
+	struct mfm_block *next_blk;
 
 	head = __mfm_block_offset(arena, hblk);
 	next = __mfm_block_next(hblk);
 	offs = __mfm_block_offset(arena, blk);
+	next_blk = &arena->mfm_base[next];
+
 
 	blk->mfmb_prev = head;
 	__mfm_block_set_next(blk, next);
 	__mfm_block_set_next(hblk, offs);
-	arena->mfm_base[next].mfmb_prev = offs;
+	next_blk->mfmb_prev = offs;
 }
 
 /*!
@@ -565,11 +568,15 @@ static inline void
 __mfm_block_remove(struct mfm_arena *arena, struct mfm_block *blk)
 {
 	uint64_t next, prev;
+	struct mfm_block *next_blk, *prev_blk;
+
 
 	next = __mfm_block_next(blk);
 	prev = blk->mfmb_prev;
-	arena->mfm_base[next].mfmb_prev = prev;
-	__mfm_block_set_next(&arena->mfm_base[prev], next);
+	next_blk = &arena->mfm_base[next];
+	prev_blk = &arena->mfm_base[prev];
+	next_blk->mfmb_prev = prev;
+	__mfm_block_set_next(prev_blk, next);
 	__builtin_bzero(blk, sizeof(struct mfm_block));
 }
 
@@ -639,26 +646,10 @@ mfm_initialize(void)
 	plat_map_t map = {0};
 #endif // MALLOC_TARGET_EXCLAVES
 
-	// FIXME: rdar://115739995
-	// On exclaves, we initialize the early allocator first, so probe addresses
-	// above the reserved 4GB region to map it. This will block the subsequent
-	// xzone data/pointer regions from landing in the reserved region as well.
-	// Note that we cannot exhaustively map the reserved region because the
-	// PMM may run out of untyped memory, and on ASAN, the shadow already
-	// occupies the reserved region
+
 #if MALLOC_TARGET_EXCLAVES
-#if !__LIBLIBC_F_ASAN_INSTRUMENTATION
-	arena = NULL;
-	for (uintptr_t probe_addr = GiB(4); !arena; probe_addr += MFM_ARENA_SIZE) {
-		arena = mvm_allocate_plat(probe_addr, MFM_ARENA_SIZE, 0,
-				VM_FLAGS_FIXED, DISABLE_ASLR | MALLOC_NO_POPULATE,
-				VM_MEMORY_MALLOC, mvm_plat_map(map));
-	}
-#else
-	arena = mvm_allocate_pages_plat(MFM_ARENA_SIZE, 0,
-			DISABLE_ASLR | MALLOC_NO_POPULATE, VM_MEMORY_MALLOC,
-			mvm_plat_map(map));
-#endif // !__LIBLIBC_F_ASAN_INSTRUMENTATION
+	arena = mvm_allocate_pages_plat(MFM_ARENA_SIZE, 0, MALLOC_NO_POPULATE,
+			VM_MEMORY_MALLOC, mvm_plat_map(map));
 #else
 	/* this is called early, which means the address space _does_ have 8M */
 	arena = mvm_allocate_pages_plat(MFM_ARENA_SIZE, 0,
@@ -688,6 +679,8 @@ mfm_initialize(void)
 	mach_vm_address_t vm_addr = (mach_vm_address_t)arena;
 	mach_vm_size_t vm_size = (mach_vm_size_t)MFM_ARENA_SIZE;
 	int alloc_flags = VM_FLAGS_OVERWRITE | VM_MAKE_TAG(VM_MEMORY_MALLOC_TINY);
+
+
 	kern_return_t kr = mach_vm_map(mach_task_self(), &vm_addr, vm_size,
 			/* mask */ 0, alloc_flags, MEMORY_OBJECT_NULL, /* offset */ 0,
 			/* copy */ false, VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
@@ -725,6 +718,7 @@ mfm_alloc_size(const void *ptr)
 {
 	struct mfm_arena *arena = os_atomic_load(&mfm_arena, dependency);
 	size_t index;
+
 
 	if (!__mfm_address_owned(arena, ptr)) {
 		return 0ul;
@@ -826,6 +820,7 @@ out:
 #endif
 	__mfm_unlock(arena);
 
+
 	return ptr;
 }
 
@@ -834,20 +829,23 @@ mfm_free(void *ptr)
 {
 	struct mfm_arena *arena = os_atomic_load(&mfm_arena, dependency);
 	size_t index, size;
+	void *addr = ptr;
 
 #if MFM_TRACE
 	dprintf(STDERR_FILENO, "{ -1, %p },\n", ptr);
 #endif
 
-	if (!__mfm_address_owned(arena, ptr)) {
+
+	if (!__mfm_address_owned(arena, addr)) {
 		MFM_INTERNAL_CRASH(ptr, "not MFM owned");
 	}
 
-	index = __mfm_block_index(arena, ptr);
+	index = __mfm_block_index(arena, addr);
 	if (!__mfm_block_is_allocated(arena, index)) {
 		MFM_CLIENT_CRASH(ptr, "not an allocated block");
 	}
 	size = __mfm_block_size(arena, index);
+
 
 	bzero(ptr, MFM_QUANTUM * size);
 
@@ -898,6 +896,7 @@ bool
 mfm_claimed_address(void *ptr)
 {
 	struct mfm_arena *arena = os_atomic_load(&mfm_arena, dependency);
+
 
 	return __mfm_address_owned(arena, ptr);
 }
