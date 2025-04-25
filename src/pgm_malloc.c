@@ -84,6 +84,7 @@ typedef struct {
 	uint32_t max_allocations;
 	uint32_t max_metadata;
 	uint32_t sample_counter_range;
+	uint32_t left_align_pct;
 	bool debug;
 	uint64_t debug_log_throttle_ms;
 
@@ -366,12 +367,17 @@ choose_metadata(pgm_zone_t *zone, uint32_t slot)
 }
 
 static uint16_t
-choose_offset_on_page(size_t size, size_t alignment, uint16_t page_size) {
+choose_offset_on_page(size_t size,
+		size_t alignment,
+		uint32_t left_align_pct,
+		uint16_t page_size)
+{
 	MALLOC_ASSERT(size <= page_size);
 	MALLOC_ASSERT(alignment <= page_size && is_power_of_2(alignment));
 	MALLOC_ASSERT(is_power_of_2(page_size));
-	boolean_t left_align = rand_uniform(2);
-	if (left_align) {
+	MALLOC_ASSERT(left_align_pct <= 100);
+
+	if (rand_uniform(100) < left_align_pct) {
 		return 0;
 	}
 	size_t mask = ~(alignment - 1);
@@ -435,7 +441,8 @@ allocate(pgm_zone_t *zone, size_t size, size_t alignment)
 	size = block_size(size);
 	uint32_t slot = choose_available_slot(zone);
 	uint32_t metadata = choose_metadata(zone, slot);
-	uint16_t offset = choose_offset_on_page(size, alignment, PAGE_SIZE);
+	uint16_t offset = choose_offset_on_page(
+			size, alignment, zone->left_align_pct, PAGE_SIZE);
 
 	// Mark page writable before updating metadata.  Ensures metadata is correct
 	// whenever a fault could be triggered.
@@ -751,7 +758,8 @@ check_configuration(const pgm_zone_t *zone)
 			(zone->max_allocations <= zone->max_metadata / 2) &&  // choose_metadata() relies on max_allocations << max_metadata
 			(zone->max_metadata <= zone->num_slots) &&
 			(zone->num_slots <= k_max_slots) &&
-			(zone->sample_counter_range > 0);
+			(zone->sample_counter_range > 0) &&
+			(0 <= zone->left_align_pct && zone->left_align_pct <= 100);
 }
 
 static bool
@@ -1151,6 +1159,7 @@ static struct {
 	bool internal_build;
 	bool MallocProbGuard_is_set;
 	bool MallocProbGuard;
+	bool targeted_coverage;
 } g_env;
 
 void
@@ -1163,6 +1172,13 @@ pgm_init_config(bool internal_build)
 	if (env_var("MallocProbGuard")) {
 		g_env.MallocProbGuard_is_set = true;
 		g_env.MallocProbGuard = env_bool("MallocProbGuard");
+	}
+
+	const char *all_factors = env_var("__TRIFactors");
+	const char *pgm_factor =
+			"PROBABILISTIC_GUARD_MALLOC_TARGETED_COVERAGE:enable=1";
+	if (all_factors && strstr(all_factors, pgm_factor)) {
+		g_env.targeted_coverage = true;
 	}
 }
 
@@ -1195,42 +1211,47 @@ should_activate(bool internal_build)
 
 #if TARGET_OS_WATCH || TARGET_OS_TV
 static bool
-is_high_memory_device(void)
+is_low_memory_device(void)
 {
-	uint64_t high_memory = 1.2 * 1024 * 1024 * 1024;  // 1.2 GB
-	return platform_hw_memsize() > high_memory;
+	uint64_t low_memory = 1.2 * 1024 * 1024 * 1024;  // 1.2 GB
+	return platform_hw_memsize() <= low_memory;
 }
 #endif
-
-#define PGM_ALLOW_NON_INTERNAL_ACTIVATION 0
-
 
 bool
 pgm_should_enable(void)
 {
+	// Env var override
 	if (g_env.MallocProbGuard_is_set) {
 		return g_env.MallocProbGuard;
 	}
-	bool internal_build = g_env.internal_build;
-	if (FEATURE_FLAG(ProbGuard, true) && should_activate(internal_build)) {
-#if TARGET_OS_OSX || TARGET_OS_IOS
-		return true;
-#elif TARGET_OS_WATCH || TARGET_OS_TV
-		if (is_high_memory_device()) {
-			return true;
-		}
-#elif PGM_ALLOW_NON_INTERNAL_ACTIVATION
-		return true;
-#else
-		if (internal_build) {
-			return true;
-		}
-#endif
+
+	// Feature flags
+	if (!FEATURE_FLAG(ProbGuard, true)) {
+		return false;
 	}
 	if (FEATURE_FLAG(ProbGuardAllProcesses, false)) {
 		return true;
 	}
-	return false;
+
+	// Excluded configurations
+#if TARGET_OS_WATCH || TARGET_OS_TV
+	if (is_low_memory_device()) {
+		return false;
+	}
+#elif TARGET_OS_BRIDGE || TARGET_OS_DRIVERKIT
+	if (!g_env.internal_build) {
+		return false;
+	}
+#endif
+
+	// Targeted coverage via Trial
+	if (g_env.targeted_coverage) {
+		return true;
+	}
+
+	// Random activation
+	return should_activate(g_env.internal_build);
 }
 
 static uint32_t
@@ -1278,6 +1299,7 @@ configure_zone(pgm_zone_t *zone)
 	uint32_t sample_rate = env_uint("MallocProbGuardSampleRate", choose_sample_rate());
 	// Approximate a (1 / sample_rate) chance for sampling; 1 means "always sample".
 	zone->sample_counter_range = (sample_rate != 1) ? (2 * sample_rate) : 1;
+	zone->left_align_pct = env_uint("MallocProbGuardLeftAlignPercentage", 10);
 	zone->debug = env_bool("MallocProbGuardDebug");
 	zone->debug_log_throttle_ms = env_uint("MallocProbGuardDebugLogThrottleInMillis", 1000);
 
